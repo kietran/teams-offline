@@ -1,0 +1,67 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          uv venv .venv --python 3.12
+          uv pip install --python .venv\Scripts\python.exe -e ".[dev]"
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Run backend tests
+        shell: pwsh
+        run: .venv\Scripts\python.exe -m pytest -q
+
+      - name: Run frontend checks
+        shell: pwsh
+        run: |
+          npm --prefix frontend test
+          npm --prefix frontend run lint
+          npm --prefix frontend run build
+          npm --prefix frontend audit --audit-level=high
+
+      - name: Build Windows portable package
+        shell: pwsh
+        run: scripts\build-windows.ps1
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeamsOfflineArchive-windows-x64
+          path: dist/TeamsOfflineArchive-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

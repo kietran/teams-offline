@@ -1,0 +1,23 @@
+import { CheckCircle2, FileText, Paperclip, Search } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { archiveApi } from '../api'
+import type { Channel, PostDetail, PostSummary } from '../types'
+
+export function ArchiveScreen({ channels }: { channels: Channel[] }) {
+  const [query, setQuery] = useState('')
+  const [channelId, setChannelId] = useState('')
+  const [posts, setPosts] = useState<PostSummary[]>([])
+  const [selected, setSelected] = useState<PostDetail | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const channelGroups = channels.reduce<Map<string, Channel[]>>((groups, channel) => {
+    groups.set(channel.teamName, [...(groups.get(channel.teamName) || []), channel])
+    return groups
+  }, new Map())
+  useEffect(() => { const timer = window.setTimeout(() => { archiveApi.posts(query, channelId).then(async result => { setPosts(result.items); setSelected(result.items[0] ? await archiveApi.post(result.items[0].id) : null); setError(null) }).catch(err => setError(err instanceof Error ? err.message : 'Không thể tìm kiếm.')) }, 250); return () => window.clearTimeout(timer) }, [query, channelId])
+  const openPost = async (post: PostSummary) => { try { setSelected(await archiveApi.post(post.id)); setError(null) } catch (err) { setError(err instanceof Error ? err.message : 'Không thể mở bài viết.') } }
+  return <main className="archive" id="main-content" tabIndex={-1}>
+    <aside className="archive-channels"><h2>Kênh</h2><button className={!channelId ? 'active' : ''} onClick={() => setChannelId('')}>Tất cả kênh</button>{[...channelGroups].map(([teamName, items]) => <section className="team-group" key={teamName}><h3>{teamName}</h3>{items.map(channel => <button className={channelId === channel.id ? 'active' : ''} key={channel.id} onClick={() => setChannelId(channel.id)}>{channel.displayName}</button>)}</section>)}<div className="offline"><CheckCircle2 size={19} />Có thể xem ngoại tuyến</div></aside>
+    <section className="results"><label className="search"><Search size={21} /><span className="sr-only">Tìm kiếm</span><input value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} placeholder="Tìm trong bài viết và bình luận..." /></label>{error ? <div className="notice error">{error}</div> : null}<div className="result-list">{posts.map(post => <button key={post.id} onClick={() => void openPost(post)} className={selected?.root.id === post.id ? 'active' : ''}><div><span className="avatar">{post.authorName.split(' ').map(word => word[0]).slice(-2).join('')}</span><div><strong>{post.authorName}</strong><b>{post.subject || 'Không có tiêu đề'}</b><p>{post.bodyText}</p></div><time>{post.createdAt ? new Date(post.createdAt).toLocaleDateString('vi-VN') : ''}</time></div>{post.attachmentCount ? <small><Paperclip size={15} />{post.attachmentCount}</small> : null}</button>)}{!posts.length ? <p className="empty-line">Chưa có bài viết phù hợp.</p> : null}</div></section>
+    <article className="detail">{selected ? <><div className="breadcrumb">{selected.root.teamName} › {selected.root.channelName}</div><header><span className="avatar">{selected.root.author_name.split(' ').map(word => word[0]).slice(-2).join('')}</span><div><strong>{selected.root.author_name}</strong><time>{selected.root.created_at ? new Date(selected.root.created_at).toLocaleString('vi-VN') : ''}</time></div></header><h1>{selected.root.subject || 'Không có tiêu đề'}</h1>{selected.root.body_html ? <div className="message-body" dangerouslySetInnerHTML={{ __html: selected.root.body_html }} /> : <p className="message-body">{selected.root.body_text}</p>}{selected.attachments.length ? <section className="attachments"><h2>Tệp đính kèm ({selected.attachments.length})</h2>{selected.attachments.map(file => <div key={file.id}><FileText size={24} /><span><strong>{file.name}</strong><small>{file.status === 'local' ? 'Đã lưu trên máy' : 'Cần thử lại'}</small></span><button className="button secondary tiny" onClick={() => void archiveApi.openAttachment(file.id)}>Mở tệp</button></div>)}</section> : null}<section className="replies"><h2>Bình luận ({selected.replies.length})</h2>{selected.replies.map(reply => <div key={reply.id}><span className="avatar">{reply.author_name.split(' ').map(word => word[0]).slice(-2).join('')}</span><div><strong>{reply.author_name}</strong><time>{reply.created_at ? new Date(reply.created_at).toLocaleString('vi-VN') : ''}</time><p>{reply.body_text}</p></div></div>)}</section></> : <div className="detail-empty"><FileText size={32} /><p>Chọn một bài viết để xem nội dung.</p></div>}</article>
+  </main>
+}

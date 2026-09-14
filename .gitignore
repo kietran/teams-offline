@@ -1,0 +1,42 @@
+# Application
+.env
+*.db
+*.db-shm
+*.db-wal
+data/
+logs/
+reports/
+offline-cache/
+*.token
+client_secret*.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.playwright-cli/
+output/playwright/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.zip
+*.tar.zst
+
+# Harness core maintenance binary
+scripts/bin/harness
+scripts/bin/harness.exe

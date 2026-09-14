@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "teams-offline-archive"
+version = "0.1.0"
+description = "Local Chrome-captured Microsoft Teams channel archive for Windows and Linux"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "nh3>=0.2,<1",
+  "platformdirs>=4.3,<5",
+  "playwright>=1.55,<2",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pyinstaller>=6.16,<7",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+]
+
+[project.scripts]
+teams-offline-archive = "teams_archive.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/teams_archive"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+addopts = "-q"

@@ -241,12 +241,76 @@ blocked. The repository therefore keeps the normal windowed executable; console
 mode is not a reliable trust workaround. Application shutdown closes the
 Playwright-managed Chrome context by design.
 
+### 11. A large thread failed after smaller threads completed
+
+Observed behavior:
+
+```text
+IntegrityError: FOREIGN KEY constraint failed
+```
+
+Cause:
+
+- The affected root had 281 replies and Teams loaded the history in overlapping
+  virtualized batches.
+- The old implementation kept only the final DOM batch after 16 load rounds.
+  That batch did not contain the root post, so the first visible reply was
+  treated as the root and later replies referenced a root row that did not
+  exist.
+- Four deleted-message tombstones had no message ID, author, timestamp, or body;
+  the old fallback key collapsed all four into one item.
+
+Repository fix:
+
+- Merge messages from every rendered reply batch by stable source identity.
+- Capture the canonical root before opening its reply pane and always persist it
+  first.
+- Give ID-less tombstones a positional capture key based on adjacent message IDs
+  and replace stale synthetic tombstones after a count-matching rerun.
+- Keep loading a known-size thread until the displayed reply count is reached or
+  the bounded 80-round limit is exhausted.
+- Added database regressions for canonical roots and synthetic-tombstone
+  idempotency.
+
+Production evidence on the same channel: 5 root posts and 396/396 replies were
+committed with zero foreign-key violations.
+
+### 12. A detached attachment card failed the whole channel
+
+Observed behavior:
+
+```text
+TimeoutError while evaluating ... nth(18)
+```
+
+Cause:
+
+Teams re-rendered its virtualized attachment list after earlier downloads. A
+later index disappeared before metadata extraction, and that extraction was
+outside the per-file error boundary.
+
+Repository fix:
+
+- Traverse the current attachment buttons in reverse order.
+- Bound metadata reads to five seconds.
+- Contain the complete metadata/menu/download operation per item so a detached
+  card is reported as a failed attachment instead of failing the channel.
+- Only recognize source URLs inside a Teams file-attachment grid; ordinary
+  links and URL previews are no longer treated as files.
+
+Limit:
+
+The verified run downloaded 31 files but left 127 attachment references pending
+because file cards outside the final rendered virtualized batch cannot yet be
+revisited. Content completeness is proven for that run; attachment completeness
+is not.
+
 ## Validation performed
 
 The latest source test run before this document reported:
 
 ```text
-16 passed
+19 passed
 ```
 
 Earlier checks on the same change series also passed:

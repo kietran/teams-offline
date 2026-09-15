@@ -131,6 +131,11 @@ application-data directory.
   Control allowed an intermediate console build but blocked one unsigned GUI
   hash, so trusted code signing remains a release requirement for predictable
   distribution.
+- Linux production capture on the 00728 channel now completes 5 root posts and
+  matches all 396 displayed replies, including a 281-reply virtualized thread
+  and four ID-less tombstones. It downloads 31 files without a channel-level
+  crash; 127 attachment references remain pending, so full attachment traversal
+  is still open.
 - Remaining: run the final Windows revision across one complete selected channel
   and verify posts, replies, downloaded files, offline opening, and idempotency
   before closing this plan.

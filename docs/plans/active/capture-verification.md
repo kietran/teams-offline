@@ -17,7 +17,17 @@ Preserve existing archive/profile. Stop only identified app processes during an 
 ## Progress
 
 - Status endpoint close race fixed locally; 16 tests pass.
-- Full real capture remains unverified. Existing app reports channel-not-visible after browser recovery.
-- Earlier viewport-removal claim was not established by live DOM evidence.
+- Reproduced the Windows-reported failure on the selected 00728 channel: the
+  first three roots completed, then a 281-reply virtualized thread omitted its
+  root from the final DOM batch and caused a SQLite foreign-key failure.
+- Capture now merges every virtualized reply batch, preserves the canonical
+  root identity, distinguishes four ID-less tombstones, and contains detached
+  attachment-card failures per file instead of failing the channel.
+- A fresh production run completed all 5 roots with 396/396 displayed replies,
+  31 downloaded files, zero foreign-key violations, and zero duplicate primary
+  keys. The run remains `partial` because 127 attachment references were not
+  downloaded; complete attachment traversal across virtualized batches remains
+  unverified.
+- Backend regression suite now has 19 passing tests.
 - Windows troubleshooting and the complete fix history are recorded in
   `docs/windows-troubleshooting.md`.

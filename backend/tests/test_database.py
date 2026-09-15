@@ -52,3 +52,38 @@ def test_initialization_marks_running_capture_interrupted(tmp_path: Path) -> Non
     run_id = db.create_capture_run([channel()["id"]]); db.update_run(run_id, "running")
     db.initialize()
     assert db.current_capture()["status"] == "interrupted"
+
+
+def test_post_uses_summary_id_as_canonical_root(tmp_path: Path) -> None:
+    db = ArchiveDatabase(tmp_path / "archive.db"); db.initialize(); db.upsert_channel(channel())
+    run_id = db.create_capture_run([channel()["id"]])
+    captured = post()
+    captured["messages"][0]["id"] = "reply-pane-rendered-first"
+
+    db.upsert_post(run_id, channel()["id"], captured)
+
+    detail = db.get_post("1000")
+    assert detail is not None
+    assert detail["root"]["id"] == "1000"
+    assert detail["replies"][0]["parent_id"] == "1000"
+
+
+def test_matching_rerun_replaces_stale_synthetic_tombstones(tmp_path: Path) -> None:
+    db = ArchiveDatabase(tmp_path / "archive.db"); db.initialize(); db.upsert_channel(channel())
+    run_id = db.create_capture_run([channel()["id"]])
+    captured = post()
+    captured.update({"expectedReplies": 2, "capturedReplies": 2, "countMatches": True})
+    captured["messages"] = [
+        captured["messages"][0],
+        {"id": None, "captureKey": "after:1000:1", "deleted": True, "attachments": [], "images": []},
+        {"id": None, "captureKey": "after:1000:2", "deleted": True, "attachments": [], "images": []},
+    ]
+    db.upsert_post(run_id, channel()["id"], captured)
+
+    captured["messages"][1]["captureKey"] = "before:1001:2"
+    captured["messages"][2]["captureKey"] = "before:1001:1"
+    db.upsert_post(run_id, channel()["id"], captured)
+
+    detail = db.get_post("1000")
+    assert detail is not None
+    assert len(detail["replies"]) == 2

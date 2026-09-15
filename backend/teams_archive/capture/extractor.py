@@ -32,6 +32,20 @@ def safe_filename(name: str) -> str:
     return cleaned[:180] or "attachment"
 
 
+def message_capture_key(message: dict[str, Any]) -> str:
+    """Deduplicate messages harvested from overlapping virtualized batches."""
+    message_id = message.get("id")
+    if message_id:
+        return f"id:{message_id}"
+    if message.get("captureKey"):
+        return f"source:{message['captureKey']}"
+    return "fallback:" + stable_hash(
+        message.get("author") or "",
+        message.get("timestamp") or message.get("timestampLabel") or "",
+        message.get("text") or "",
+    )
+
+
 def team_from_title(page_title: str, channel_name: str) -> str:
     parts = [part.strip() for part in page_title.split("|")]
     if len(parts) >= 4 and parts[0].startswith("Teams"):
@@ -138,14 +152,30 @@ class TeamsDomExtractor:
         })""")
 
     async def _extract_messages(self, page: Any, selector: str) -> list[dict[str, Any]]:
-        return await page.evaluate(r"""selector => [...document.querySelectorAll(selector)].map((el, index) => {
+        return await page.evaluate(r"""selector => {
+          const elements = [...document.querySelectorAll(selector)];
+          const messageId = el => el.querySelector('[data-tid="message-body"]')?.id?.match(/content-(\d{10,})/)?.[1] || null;
+          const ids = elements.map(messageId);
+          return elements.map((el, index) => {
           const clean = value => (value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
           const body = el.querySelector('[data-tid="message-body"]');
-          const id = body?.id?.match(/content-(\d{10,})/)?.[1] || null;
+          const id = ids[index];
           const avatar = el.querySelector('[data-tid="post-message-header-avatar"][aria-label], [data-tid="reply-message-header-avatar"][aria-label]');
           const explicit = el.querySelector('time[data-tid="timestamp"]')?.getAttribute('aria-label') || null;
+          let captureKey = null;
+          if (!id) {
+            let previous = index - 1;
+            while (previous >= 0 && !ids[previous]) previous -= 1;
+            if (previous >= 0) {
+              captureKey = `after:${ids[previous]}:${index - previous}`;
+            } else {
+              let next = index + 1;
+              while (next < ids.length && !ids[next]) next += 1;
+              captureKey = `before:${next < ids.length ? ids[next] : 'end'}:${next - index}`;
+            }
+          }
           const attachments = []; const seen = new Set();
-          for (const node of el.querySelectorAll('[aria-label*="http"]')) {
+          for (const node of el.querySelectorAll('[data-tid="file-attachment-grid"] [aria-label*="http"]')) {
             const label = node.getAttribute('aria-label') || ''; const match = label.match(/https?:\/\/\S+/);
             if (!match) continue; const url = match[0]; const name = clean(label.slice(0, match.index));
             if (!seen.has(url)) { seen.add(url); attachments.push({name, url}); }
@@ -155,9 +185,10 @@ class TeamsDomExtractor:
             timestampLabel:explicit, subject:clean(el.querySelector('[data-tid="subject-line"]')?.textContent),
             text:el.querySelector('[data-tid="message-tombstone"]') ? '[This message has been deleted.]' : clean(body?.innerText),
             html:el.querySelector('[data-tid="message-tombstone"]') ? '' : (body?.innerHTML || ''),
-            deleted:Boolean(el.querySelector('[data-tid="message-tombstone"]')), attachments,
+            deleted:Boolean(el.querySelector('[data-tid="message-tombstone"]')), captureKey, attachments,
             images:[...body?.querySelectorAll('img') || []].map(img => ({alt:img.alt || '', src:img.src || ''}))};
-        })""", selector)
+          });
+        }""", selector)
 
     async def _extract_inline_messages(self, page: Any, post_id: str) -> list[dict[str, Any]]:
         return await page.evaluate(r"""postId => {
@@ -170,7 +201,7 @@ class TeamsDomExtractor:
             const avatar = el.querySelector('[data-tid="post-message-header-avatar"][aria-label], [data-tid="reply-message-header-avatar"][aria-label]');
             const explicit = el.querySelector('time[data-tid="timestamp"]')?.getAttribute('aria-label') || null;
             const attachments=[]; const seen=new Set();
-            for (const node of el.querySelectorAll('[aria-label*="http"]')) {
+            for (const node of el.querySelectorAll('[data-tid="file-attachment-grid"] [aria-label*="http"]')) {
               const label=node.getAttribute('aria-label')||''; const match=label.match(/https?:\/\/\S+/);
               if(match&&!seen.has(match[0])){seen.add(match[0]);attachments.push({name:clean(label.slice(0,match.index)),url:match[0]});}
             }
@@ -181,20 +212,57 @@ class TeamsDomExtractor:
           });
         }""", post_id)
 
-    async def _load_thread(self, page: Any) -> tuple[list[dict[str, Any]], int]:
+    async def _load_thread(
+        self,
+        page: Any,
+        post_id: str,
+        root_message: dict[str, Any],
+        expected_replies: int,
+    ) -> tuple[list[dict[str, Any]], int]:
         viewport = page.locator('[data-tid="channel-replies-viewport"]')
         await viewport.wait_for(state="visible", timeout=15_000)
+        captured: dict[str, tuple[int, dict[str, Any]]] = {}
+        discovery_order = 0
         previous = -1
         stable = 0
-        for _ in range(16):
+
+        async def harvest() -> None:
+            nonlocal discovery_order
+            batch = await self._extract_messages(page, '[data-tid="channel-replies-pane-message"]')
+            for message in batch:
+                if message.get("id") == post_id:
+                    continue
+                key = message_capture_key(message)
+                if key not in captured:
+                    captured[key] = (discovery_order, message)
+                    discovery_order += 1
+                else:
+                    first_seen, _ = captured[key]
+                    captured[key] = (first_seen, message)
+
+        await harvest()
+        for _ in range(80):
+            if len(captured) >= expected_replies:
+                break
             await viewport.evaluate("el => { el.scrollTop=0; el.dispatchEvent(new Event('scroll',{bubbles:true})); }")
             await asyncio.sleep(0.65)
-            count = await page.locator('[data-tid="channel-replies-pane-message"]').count()
+            await harvest()
+            count = len(captured)
             stable = stable + 1 if count == previous else 0
             previous = count
-            if stable >= 3:
+            if stable >= 3 and expected_replies <= 0:
                 break
-        return await self._extract_messages(page, '[data-tid="channel-replies-pane-message"]'), stable
+
+        def reply_order(item: tuple[int, dict[str, Any]]) -> tuple[int, int | str, int]:
+            first_seen, message = item
+            message_id = message.get("id") or ""
+            if message_id.isdigit():
+                return (0, int(message_id), first_seen)
+            timestamp = message.get("timestamp") or message.get("timestampLabel") or ""
+            return (1, timestamp, first_seen)
+
+        replies = [message for _, message in sorted(captured.values(), key=reply_order)]
+        return [{**root_message, "id": post_id, "order": 0}, *replies], stable
 
     async def _save_assets(self, page: Any, channel_id: str, messages: list[dict[str, Any]]) -> None:
         for message in messages:
@@ -233,38 +301,48 @@ class TeamsDomExtractor:
     async def _download_attachments(self, page: Any, channel_id: str, messages: list[dict[str, Any]]) -> tuple[int, int]:
         by_url = {item["url"]: item for message in messages for item in message.get("attachments", []) if item.get("url")}
         by_id = {message.get("id"): message for message in messages if message.get("id")}
+        message_by_url: dict[str, dict[str, Any]] = {}
+        for message in messages:
+            for attachment in message.get("attachments", []):
+                if attachment.get("url"):
+                    message_by_url.setdefault(attachment["url"], message)
         action_buttons = page.locator('[data-tid="file-attachment-grid"]').get_by_role(
             "button", name="More actions"
         )
         downloaded = 0
-        for index in range(await action_buttons.count()):
-            more = action_buttons.nth(index)
-            group = more.locator("xpath=ancestor::*[@role='group'][1]")
-            metadata = await group.evaluate(r"""el => {
-              const label=el.getAttribute('aria-label')||'';
-              const nested=[...el.querySelectorAll('[aria-label*="http"]')].map(node=>node.getAttribute('aria-label')||'');
-              const source=[label,...nested].find(value=>/https?:\/\//.test(value))||'';
-              const url=source.match(/https?:\/\/\S+/)?.[0]||null;
-              let current=el.parentElement; let messageId=null;
-              while(current&&!messageId){const bodies=current.querySelectorAll('[data-tid="message-body"]');if(bodies.length===1)messageId=bodies[0].id?.match(/content-(\d{10,})/)?.[1]||null;current=current.parentElement;}
-              return {name:label.trim(),url,messageId};
-            }""")
-            name = metadata.get("name") or "attachment"
-            url = metadata.get("url")
-            message = by_id.get(metadata.get("messageId")) or (messages[0] if messages else None)
-            if not message:
-                continue
-            item = by_url.get(url) if url else next(
-                (entry for entry in message.get("attachments", []) if entry.get("name") == name), None
-            )
-            if not item:
-                item = {"name": name, "url": url}
-                message.setdefault("attachments", []).append(item)
-            attachment_id = stable_hash(message.get("id") or "", url or f"{name}:{index}")
-            item.update({"id": attachment_id, "captureMode": "download"})
-            target_dir = self.files_root / storage_key(channel_id) / attachment_id
-            target_dir.mkdir(parents=True, exist_ok=True)
+        # Teams may virtualize or re-render attachment cards after each menu
+        # action. Walking backwards keeps remaining indexes valid more often,
+        # while the per-item boundary prevents one detached card from failing
+        # the entire channel.
+        for index in reversed(range(await action_buttons.count())):
+            item: dict[str, Any] | None = None
             try:
+                more = action_buttons.nth(index)
+                group = more.locator("xpath=ancestor::*[@role='group'][1]")
+                metadata = await group.evaluate(r"""el => {
+                  const label=el.getAttribute('aria-label')||'';
+                  const nested=[...el.querySelectorAll('[aria-label*="http"]')].map(node=>node.getAttribute('aria-label')||'');
+                  const source=[label,...nested].find(value=>/https?:\/\//.test(value))||'';
+                  const url=source.match(/https?:\/\/\S+/)?.[0]||null;
+                  let current=el.parentElement; let messageId=null;
+                  while(current&&!messageId){const bodies=current.querySelectorAll('[data-tid="message-body"]');if(bodies.length===1)messageId=bodies[0].id?.match(/content-(\d{10,})/)?.[1]||null;current=current.parentElement;}
+                  return {name:label.trim(),url,messageId};
+                }""", timeout=5_000)
+                name = metadata.get("name") or "attachment"
+                url = metadata.get("url")
+                message = by_id.get(metadata.get("messageId")) or message_by_url.get(url)
+                if not message:
+                    continue
+                item = by_url.get(url) if url else next(
+                    (entry for entry in message.get("attachments", []) if entry.get("name") == name), None
+                )
+                if not item:
+                    item = {"name": name, "url": url}
+                    message.setdefault("attachments", []).append(item)
+                attachment_id = stable_hash(message.get("id") or "", url or f"{name}:{index}")
+                item.update({"id": attachment_id, "captureMode": "download"})
+                target_dir = self.files_root / storage_key(channel_id) / attachment_id
+                target_dir.mkdir(parents=True, exist_ok=True)
                 await more.click(timeout=8_000)
                 async with page.expect_download(timeout=20_000) as pending:
                     await page.get_by_role("menuitem", name="Download").click(timeout=8_000)
@@ -274,8 +352,12 @@ class TeamsDomExtractor:
                 item.update({"localPath": str(target), "status": "local", "errorCode": None})
                 downloaded += 1
             except Exception as exc:
-                item.update({"localPath": None, "status": "failed", "errorCode": type(exc).__name__})
-                await page.keyboard.press("Escape")
+                if item is not None:
+                    item.update({"localPath": None, "status": "failed", "errorCode": type(exc).__name__})
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
         for message in messages:
             for item in message.get("attachments", []):
                 item.setdefault("id", stable_hash(message.get("id") or "", item.get("url") or item.get("name") or ""))
@@ -317,10 +399,17 @@ class TeamsDomExtractor:
                 messages: list[dict[str, Any]] = []
                 stable = 0
                 if expected and summary.get("hasReplyButton"):
+                    root_candidates = await self._extract_messages(page, f"#reply-chain-summary-{post_id}")
+                    root_message = next(
+                        (message for message in root_candidates if message.get("id") == post_id),
+                        root_candidates[0] if root_candidates else None,
+                    )
+                    if root_message is None:
+                        raise RuntimeError("root-message-not-found")
                     for _attempt in range(3):
                         root = page.locator(f"#reply-chain-summary-{post_id}")
                         await root.locator('[data-tid="response-summary-button"]').click(timeout=10_000)
-                        messages, stable = await self._load_thread(page)
+                        messages, stable = await self._load_thread(page, post_id, root_message, expected)
                         if len(messages) - 1 == expected:
                             break
                         await page.locator('[data-tid="close-l2-view-button"]').click()

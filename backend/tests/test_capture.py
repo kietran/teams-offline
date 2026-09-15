@@ -1,4 +1,11 @@
-from teams_archive.capture.extractor import FORBIDDEN_ACTION_NAMES, safe_filename, stable_hash, storage_key, team_from_title
+from teams_archive.capture.extractor import (
+    FORBIDDEN_ACTION_NAMES,
+    message_capture_key,
+    safe_filename,
+    stable_hash,
+    storage_key,
+    team_from_title,
+)
 from teams_archive.capture.service import sanitize_post
 
 
@@ -32,3 +39,15 @@ def test_message_html_is_sanitized_before_storage() -> None:
 
 def test_forbidden_write_actions_are_explicitly_owned() -> None:
     assert {"send", "share", "edit", "delete", "reply in thread"} <= FORBIDDEN_ACTION_NAMES
+
+
+def test_virtualized_message_batches_have_stable_deduplication_keys() -> None:
+    assert message_capture_key({"id": "123", "text": "first render"}) == message_capture_key(
+        {"id": "123", "text": "updated render"}
+    )
+    assert message_capture_key({"id": None, "author": "A", "timestamp": "T", "text": "Body"}) == message_capture_key(
+        {"id": None, "author": "A", "timestamp": "T", "text": "Body"}
+    )
+    assert message_capture_key({"id": None, "captureKey": "after:100:1"}) != message_capture_key(
+        {"id": None, "captureKey": "after:100:2"}
+    )

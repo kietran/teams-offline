@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -104,6 +105,20 @@ CREATE TABLE IF NOT EXISTS capture_post_runs (
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def stable_message_fallback(message: dict[str, Any], index: int) -> str:
+    capture_key = message.get("captureKey")
+    payload = str(capture_key) if capture_key else "\n".join(
+        str(value)
+        for value in (
+            message.get("author") or "",
+            message.get("timestamp") or message.get("timestampLabel") or "",
+            message.get("text") or "",
+            index,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
 class ArchiveDatabase:
@@ -282,8 +297,19 @@ class ArchiveDatabase:
             raise ValueError("captured post has no messages")
         root_id = post["id"]
         with self.connect() as connection:
+            current_synthetic_ids: set[str] = set()
             for index, message in enumerate(messages):
-                message_id = message.get("id") or f"{root_id}:deleted:{index}"
+                # The root identity comes from the channel summary. Keeping it
+                # canonical prevents a partially loaded reply pane from making
+                # replies reference a root row that was never inserted.
+                if index == 0:
+                    message_id = root_id
+                elif message.get("id"):
+                    message_id = message["id"]
+                else:
+                    capture_key = stable_message_fallback(message, index)
+                    message_id = f"{root_id}:synthetic:{capture_key}"
+                    current_synthetic_ids.add(message_id)
                 parent_id = None if index == 0 else root_id
                 connection.execute(
                     """INSERT INTO messages(
@@ -334,6 +360,27 @@ class ArchiveDatabase:
                             asset["id"], message_id, asset.get("mimeType"), asset["localPath"],
                             asset.get("sizeBytes"), now, asset.get("src"), asset.get("captureMode", "original"),
                         ),
+                    )
+            if post.get("countMatches"):
+                stale_synthetic = [
+                    row["id"]
+                    for row in connection.execute(
+                        """SELECT id FROM messages WHERE parent_id=?
+                           AND (id LIKE ? OR id LIKE ?)""",
+                        (root_id, f"{root_id}:deleted:%", f"{root_id}:synthetic:%"),
+                    ).fetchall()
+                    if row["id"] not in current_synthetic_ids
+                ]
+                if stale_synthetic:
+                    placeholders = ",".join("?" for _ in stale_synthetic)
+                    connection.execute(
+                        f"DELETE FROM attachments WHERE message_id IN ({placeholders})", stale_synthetic
+                    )
+                    connection.execute(
+                        f"DELETE FROM hosted_assets WHERE message_id IN ({placeholders})", stale_synthetic
+                    )
+                    connection.execute(
+                        f"DELETE FROM messages WHERE id IN ({placeholders})", stale_synthetic
                     )
             connection.execute(
                 """INSERT INTO capture_post_runs(

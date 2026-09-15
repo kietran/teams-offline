@@ -8,6 +8,8 @@ Start with the smallest authoritative surface.
   completion.
 - `ARCHITECTURE.md`: current product, code, state, update, and ownership
   boundaries.
+- [`windows-troubleshooting.md`](windows-troubleshooting.md): investigated
+  Windows packaging/runtime failures, fixes, evidence, and remaining limits.
 - `HARNESS.md`: product principles and installed-core model.
 - `product/`: current product behavior and installation contract.
 - `decisions/`: lasting choices future work must inherit.

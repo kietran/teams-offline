@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-import nh3
+import bleach
 
 from ..db import ArchiveDatabase
 from .browser import ChromeSessionManager
@@ -13,16 +13,18 @@ from .extractor import TeamsDomExtractor
 
 ALLOWED_TAGS = {"p", "br", "strong", "b", "em", "i", "u", "s", "ul", "ol", "li", "a", "blockquote", "code", "pre", "span"}
 ALLOWED_ATTRIBUTES = {"a": {"href", "title", "target"}, "span": {"title"}}
+HTML_CLEANER = bleach.Cleaner(
+    tags=ALLOWED_TAGS,
+    attributes=ALLOWED_ATTRIBUTES,
+    protocols={"http", "https", "mailto"},
+    strip=True,
+    strip_comments=True,
+)
 
 
 def sanitize_post(post: dict[str, Any]) -> dict[str, Any]:
     for message in post.get("messages", []):
-        message["html"] = nh3.clean(
-            message.get("html") or "",
-            tags=ALLOWED_TAGS,
-            attributes=ALLOWED_ATTRIBUTES,
-            url_schemes={"http", "https", "mailto"},
-        )
+        message["html"] = HTML_CLEANER.clean(message.get("html") or "")
     return post
 
 
@@ -79,11 +81,42 @@ class CaptureCoordinator:
         if current and current["id"] == run_id and current["status"] == "paused":
             self.database.update_run(run_id, "running", current_channel_id=current.get("current_channel_id"))
 
+    @staticmethod
+    def _browser_was_closed(exc: Exception) -> bool:
+        return type(exc).__name__ == "TargetClosedError" or "page, context or browser has been closed" in str(exc).lower()
+
+    async def _capture_channel_once(self, run_id: str, channel_id: str, channel: dict[str, Any]) -> dict[str, int]:
+        page = await self.browser.page()
+        await self.extractor.navigate_to_channel(page, channel["team_name"], channel["display_name"])
+        completed = self.database.completed_post_ids(run_id)
+        counters = {"posts": 0, "expected": 0, "captured": 0, "files": 0}
+
+        async def on_post(post: dict[str, Any]) -> None:
+            sanitized = sanitize_post(post)
+            self.database.upsert_post(run_id, channel_id, sanitized)
+            counters["posts"] += 1
+            counters["expected"] += post.get("expectedReplies", 0)
+            counters["captured"] += post.get("capturedReplies", 0)
+            counters["files"] += sum(
+                item.get("status") == "local"
+                for message in post.get("messages", [])
+                for item in message.get("attachments", [])
+            )
+            self.database.update_channel_run(
+                run_id, channel_id, status="running", posts_seen=counters["posts"],
+                posts_completed=counters["posts"], expected_replies=counters["expected"],
+                captured_replies=counters["captured"], files_captured=counters["files"],
+            )
+
+        identity = await self.extractor.discover_current_channel(page)
+        return await self.extractor.capture_channel(
+            page, identity, completed, on_post, lambda: self._pause_gate(run_id),
+        )
+
     async def _run(self, run_id: str) -> None:
         failures = 0
         totals = {"channels": 0, "posts": 0, "expectedReplies": 0, "capturedReplies": 0, "files": 0, "failedFiles": 0, "uncertain": 0}
         try:
-            page = await self.browser.page()
             self.database.update_run(run_id, "running")
             for channel_id in self.database.capture_channel_ids(run_id):
                 await self._pause_gate(run_id)
@@ -91,31 +124,15 @@ class CaptureCoordinator:
                 self.database.update_run(run_id, "running", current_channel_id=channel_id)
                 self.database.update_channel_run(run_id, channel_id, status="running")
                 try:
-                    await self.extractor.navigate_to_channel(page, channel["team_name"], channel["display_name"])
-                    completed = self.database.completed_post_ids(run_id)
-                    counters = {"posts": 0, "expected": 0, "captured": 0, "files": 0}
-
-                    async def on_post(post: dict[str, Any]) -> None:
-                        sanitized = sanitize_post(post)
-                        self.database.upsert_post(run_id, channel_id, sanitized)
-                        counters["posts"] += 1
-                        counters["expected"] += post.get("expectedReplies", 0)
-                        counters["captured"] += post.get("capturedReplies", 0)
-                        counters["files"] += sum(
-                            item.get("status") == "local"
-                            for message in post.get("messages", [])
-                            for item in message.get("attachments", [])
-                        )
-                        self.database.update_channel_run(
-                            run_id, channel_id, status="running", posts_seen=counters["posts"],
-                            posts_completed=counters["posts"], expected_replies=counters["expected"],
-                            captured_replies=counters["captured"], files_captured=counters["files"],
-                        )
-
-                    result = await self.extractor.capture_channel(
-                        page, await self.extractor.discover_current_channel(page), completed, on_post,
-                        lambda: self._pause_gate(run_id),
-                    )
+                    for attempt in range(2):
+                        try:
+                            result = await self._capture_channel_once(run_id, channel_id, channel)
+                            break
+                        except Exception as exc:
+                            if attempt == 0 and self._browser_was_closed(exc):
+                                await self.browser.reopen()
+                                continue
+                            raise
                     channel_status = "partial" if result["uncertain"] or result["failedFiles"] else "completed"
                     self.database.update_channel_run(
                         run_id, channel_id, status=channel_status,

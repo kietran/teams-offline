@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sys
 from pathlib import Path
@@ -49,17 +50,24 @@ class ChromeSessionManager:
             return await self.status()
         if not self.installed:
             raise RuntimeError("chrome-not-installed")
+        if self._playwright or self._context or self._teams_page:
+            await self.close()
         from playwright.async_api import async_playwright
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            channel="chrome",
-            headless=False,
-            accept_downloads=True,
-            viewport={"width": 1440, "height": 900},
-        )
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.profile_dir),
+                channel="chrome",
+                headless=False,
+                accept_downloads=True,
+                viewport={"width": 1440, "height": 900},
+            )
+        except Exception:
+            await self._playwright.stop()
+            self._playwright = None
+            raise
         pages = [page for page in self._context.pages if "teams." in page.url]
         self._teams_page = pages[0] if pages else await self._context.new_page()
         if not pages:
@@ -73,21 +81,40 @@ class ChromeSessionManager:
         assert self._teams_page is not None
         return self._teams_page
 
+    async def reopen(self) -> ChromeState:
+        """Discard a dead Playwright session and reopen its persistent profile."""
+        await self.close()
+        await asyncio.sleep(1.0)
+        return await self.open()
+
     async def status(self) -> ChromeState:
-        running = bool(self._context and self._teams_page and not self._teams_page.is_closed())
+        from playwright.async_api import Error
+
+        page = self._teams_page
+        running = bool(self._context and page and not page.is_closed())
         if not running:
             return ChromeState(self.installed, False, False, False)
-        assert self._teams_page is not None
-        url = self._teams_page.url
+        try:
+            return await self._page_status(page)
+        except Error as exc:
+            # The page may close after is_closed(), or recovery may replace it
+            # while this request is awaiting a DOM read. Never close/reset the
+            # shared session here: a newer capture may already own it.
+            if page.is_closed() or "target page, context or browser has been closed" in str(exc).lower():
+                return ChromeState(self.installed, False, False, False)
+            raise
+
+    async def _page_status(self, page: Page) -> ChromeState:
+        url = page.url
         login = "login.microsoftonline.com" in url or "login.live.com" in url
-        signed_in = not login and await self._teams_page.locator('[data-tid="experience-layout"]').count() > 0
+        signed_in = not login and await page.locator('[data-tid="experience-layout"]').count() > 0
         current = None
         if signed_in:
-            title_node = self._teams_page.locator('[data-tid="channelTitle-text"]')
+            title_node = page.locator('[data-tid="channelTitle-text"]')
             if await title_node.count():
                 title = await title_node.first.text_content(timeout=1_000)
                 if title:
-                    current = {"displayName": title.strip(), "pageTitle": await self._teams_page.title()}
+                    current = {"displayName": title.strip(), "pageTitle": await page.title()}
         return ChromeState(self.installed, True, signed_in, login, current)
 
     async def close(self) -> None:

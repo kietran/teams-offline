@@ -9,8 +9,8 @@ a = Analysis(
     binaries=[],
     datas=[(str(root / "frontend" / "dist"), "frontend_dist")],
     hiddenimports=[
-        "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.websockets.auto", "playwright.async_api",
+        "uvicorn.logging", "uvicorn.loops.asyncio", "uvicorn.protocols.http.h11_impl",
+        "playwright.async_api",
     ],
     hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=[], noarchive=False,
 )

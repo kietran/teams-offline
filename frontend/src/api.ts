@@ -22,7 +22,10 @@ export const archiveApi = {
   removeChannel: (id: string) => request<void>(`/api/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   completeSetup: () => request<{ setupComplete: boolean }>('/api/setup/complete', { method: 'POST' }),
   openStorage: () => request<void>('/api/storage/open', { method: 'POST' }),
-  startCapture: () => request<{ id: string }>('/api/captures', { method: 'POST', body: '{}' }),
+  startCapture: (channelIds?: string[]) => request<{ id: string }>('/api/captures', {
+    method: 'POST',
+    body: JSON.stringify(channelIds?.length ? { channelIds } : {}),
+  }),
   capture: () => request<CaptureRun | null>('/api/captures/current'),
   pauseCapture: (id: string) => request(`/api/captures/${id}/pause`, { method: 'POST' }),
   resumeCapture: (id: string) => request(`/api/captures/${id}/resume`, { method: 'POST' }),

@@ -59,3 +59,26 @@ async def test_inline_replies_are_split_from_one_channel_root(tmp_path) -> None:
         await browser.close()
     assert [message["text"] for message in messages] == ["Root body", "Reply one", "Reply two"]
     assert [message["author"] for message in messages] == ["Lan", "Nam", "Hoa"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_channel_viewport_falls_back_to_scrollable_message_parent(tmp_path) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chrome", headless=True)
+        page = await browser.new_page()
+        await page.set_content("""
+          <main id="message-pane-layout-a11y">
+            <div id="current-channel-scroll" style="height:100px; overflow-y:auto">
+              <div style="height:1000px">
+                <div data-tid="channel-pane-message" id="reply-chain-summary-1000">Post</div>
+              </div>
+            </div>
+          </main>
+        """)
+        extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+        viewport = await extractor._channel_viewport(page)
+        viewport_id = await viewport.get_attribute("id")
+        await browser.close()
+
+    assert viewport_id == "current-channel-scroll"

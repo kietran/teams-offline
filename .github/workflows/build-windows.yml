@@ -62,6 +62,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TeamsOfflineArchive-windows-x64
-          path: dist/TeamsOfflineArchive-windows-x64.zip
+          path: dist/Teams Offline Archive
           if-no-files-found: error
           retention-days: 30

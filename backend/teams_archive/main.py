@@ -13,6 +13,17 @@ from .config import DEFAULT_PORT, LOOPBACK_HOST
 
 
 def main() -> None:
+    if "--self-test" in sys.argv:
+        import asyncio
+
+        from playwright.async_api import async_playwright
+
+        async def test_playwright_driver() -> None:
+            driver = await async_playwright().start()
+            await driver.stop()
+
+        asyncio.run(test_playwright_driver())
+        return
     if getattr(sys, "frozen", False):
         frontend_dist = Path(getattr(sys, "_MEIPASS")) / "frontend_dist"
     else:
@@ -24,6 +35,9 @@ def main() -> None:
         host=LOOPBACK_HOST,
         port=DEFAULT_PORT,
         log_config=None,
+        loop="asyncio",
+        http="h11",
+        ws="none",
     )
 
 

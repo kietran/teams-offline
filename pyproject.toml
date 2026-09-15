@@ -8,11 +8,11 @@ version = "0.1.0"
 description = "Local Chrome-captured Microsoft Teams channel archive for Windows and Linux"
 requires-python = ">=3.12"
 dependencies = [
+  "bleach>=6.2,<7",
   "fastapi>=0.115,<1",
-  "nh3>=0.2,<1",
   "platformdirs>=4.3,<5",
   "playwright>=1.55,<2",
-  "uvicorn[standard]>=0.34,<1",
+  "uvicorn>=0.34,<1",
 ]
 
 [project.optional-dependencies]

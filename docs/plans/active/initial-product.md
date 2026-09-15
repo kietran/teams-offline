@@ -62,7 +62,9 @@ Google Chrome, then provides an offline searchable archive.
 - [x] Implement the selected-channel queue, pause/resume, schema v2, local API,
   archive search/viewer and local attachment opening.
 - [x] Build and smoke-test the Linux x86_64 portable package.
-- [ ] Build and smoke-test the Windows x64 portable package on Windows.
+- [x] Build and smoke-test the Windows x64 portable package on Windows.
+- [ ] Complete the final Windows revision against one real selected channel,
+  including reply-count and attachment-file evidence.
 
 ## Validation
 
@@ -114,7 +116,7 @@ application-data directory.
 
 ## Final Validation Snapshot
 
-- Backend: 12 pytest cases pass, including schema migration, idempotency,
+- Backend: 16 pytest cases pass, including schema migration, idempotency,
   sanitization, DOM selectors, inline replies and forbidden-action ownership.
 - Frontend: Vitest pass, ESLint pass, production Vite build pass, npm audit
   reports 0 vulnerabilities.
@@ -125,6 +127,10 @@ application-data directory.
   health/status/frontend smoke pass.
 - Linux artifact SHA-256:
   `533642f57376a419cd96121b0ce131cacb0aea4b8a59c18eaca6c064d46cdc32`.
-- Remaining: build/smoke Windows x64 on Windows and run the production capture
-  service across at least one additional selected channel before closing this
-  plan.
+- Windows package QA: onedir builds and Playwright self-tests pass. Smart App
+  Control allowed an intermediate console build but blocked one unsigned GUI
+  hash, so trusted code signing remains a release requirement for predictable
+  distribution.
+- Remaining: run the final Windows revision across one complete selected channel
+  and verify posts, replies, downloaded files, offline opening, and idempotency
+  before closing this plan.

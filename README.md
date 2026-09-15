@@ -31,9 +31,12 @@ TEAMS_ARCHIVE_DATA_DIR=/tmp/teams-offline-archive-dev .venv/bin/python -m teams_
 ## Tải bản Windows từ GitHub Actions
 
 Mở tab **Actions** của repository, chọn workflow **Build Windows**, mở run mới
-nhất và tải artifact `TeamsOfflineArchive-windows-x64`. Giải nén artifact rồi
-giải nén `TeamsOfflineArchive-windows-x64.zip`; chạy
-`Teams Offline Archive/Teams Offline Archive.exe`.
+nhất và tải artifact `TeamsOfflineArchive-windows-x64`. Giải nén một lần rồi
+chạy `Teams Offline Archive.exe`. Build hiện chưa được ký số; Smart App Control
+có thể chặn một executable hash chưa có uy tín. Không cần tắt Smart App Control
+để xử lý lỗi DLL `nh3` đã biết, nhưng phát hành ổn định sang máy khác cần quy
+trình code signing tin cậy. Chi tiết và lịch sử sửa lỗi nằm tại
+[`docs/windows-troubleshooting.md`](docs/windows-troubleshooting.md).
 
 ## Kiểm tra
 

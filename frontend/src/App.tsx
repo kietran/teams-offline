@@ -51,6 +51,7 @@ export default function App() {
       view === 'capture' ? <CaptureScreen channels={channels} chrome={status.chrome} capture={status.capture} busy={busy} error={error}
         onManage={() => { setStep(2); setManaging(true) }} onStart={() => void run(archiveApi.startCapture)}
         onPause={() => status.capture && void run(() => archiveApi.pauseCapture(status.capture!.id))}
-        onResume={() => status.capture && void run(() => archiveApi.resumeCapture(status.capture!.id))} /> : <ArchiveScreen channels={channels} />}
+        onResume={() => status.capture && void run(() => archiveApi.resumeCapture(status.capture!.id))}
+        onRetry={channelId => void run(() => archiveApi.startCapture([channelId]))} /> : <ArchiveScreen channels={channels} />}
   </div>
 }

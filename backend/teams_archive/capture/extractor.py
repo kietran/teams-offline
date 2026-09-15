@@ -11,10 +11,20 @@ from .models import ChannelIdentity
 
 
 FORBIDDEN_ACTION_NAMES = {"send", "share", "edit", "delete", "reply in thread"}
+CHANNEL_SURFACE_SELECTOR = (
+    '[data-tid="channel-pane-viewport"], #message-pane-layout-a11y, '
+    '[data-tid="channel-pane-message"], [id^="reply-chain-summary-"]'
+)
+CHANNEL_MESSAGE_SELECTOR = '[data-tid="channel-pane-message"], [id^="reply-chain-summary-"]'
 
 
 def stable_hash(*parts: str) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def storage_key(identifier: str) -> str:
+    """Return a deterministic directory name safe on every supported platform."""
+    return stable_hash(identifier)[:32]
 
 
 def safe_filename(name: str) -> str:
@@ -33,6 +43,34 @@ class TeamsDomExtractor:
     def __init__(self, files_root: Path, assets_root: Path) -> None:
         self.files_root = files_root
         self.assets_root = assets_root
+
+    async def _channel_viewport(self, page: Any) -> Any:
+        """Find the channel scroller without depending on one Teams DOM version."""
+        surface = page.locator(CHANNEL_SURFACE_SELECTOR).first
+        await surface.wait_for(state="visible", timeout=30_000)
+
+        legacy = page.locator('[data-tid="channel-pane-viewport"]').first
+        if await legacy.count() and await legacy.is_visible():
+            return legacy
+
+        message = page.locator(CHANNEL_MESSAGE_SELECTOR).first
+        for _ in range(20):
+            if await message.count() and await message.is_visible():
+                handle = await message.evaluate_handle("""element => {
+                  for (let node = element.parentElement; node; node = node.parentElement) {
+                    const style = getComputedStyle(node);
+                    if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) {
+                      return node;
+                    }
+                  }
+                  return element.closest('#message-pane-layout-a11y, [role="feed"], [role="main"]')
+                    || document.scrollingElement;
+                }""")
+                element = handle.as_element()
+                if element:
+                    return element
+            await asyncio.sleep(0.25)
+        return surface
 
     async def navigate_to_channel(self, page: Any, team_name: str, channel_name: str) -> None:
         current_node = page.locator('[data-tid="channelTitle-text"]')
@@ -165,7 +203,7 @@ class TeamsDomExtractor:
             for index, image in enumerate(message.get("images", [])):
                 src = image.get("src") or ""
                 asset_id = stable_hash(message_id, src or str(index))
-                target_dir = self.assets_root / channel_id
+                target_dir = self.assets_root / storage_key(channel_id)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 stored = None
                 capture_mode = "original"
@@ -224,7 +262,7 @@ class TeamsDomExtractor:
                 message.setdefault("attachments", []).append(item)
             attachment_id = stable_hash(message.get("id") or "", url or f"{name}:{index}")
             item.update({"id": attachment_id, "captureMode": "download"})
-            target_dir = self.files_root / channel_id / attachment_id
+            target_dir = self.files_root / storage_key(channel_id) / attachment_id
             target_dir.mkdir(parents=True, exist_ok=True)
             try:
                 await more.click(timeout=8_000)
@@ -258,8 +296,7 @@ class TeamsDomExtractor:
         on_post: Callable[[dict[str, Any]], Awaitable[None]],
         pause_gate: Callable[[], Awaitable[None]],
     ) -> dict[str, int]:
-        viewport = page.locator('[data-tid="channel-pane-viewport"]')
-        await viewport.wait_for(state="visible", timeout=15_000)
+        viewport = await self._channel_viewport(page)
         await viewport.evaluate("el => { el.scrollTop=el.scrollHeight; el.dispatchEvent(new Event('scroll',{bubbles:true})); }")
         await asyncio.sleep(1.0)
         captured: set[str] = set()

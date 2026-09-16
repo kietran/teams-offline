@@ -44,7 +44,18 @@ jobs:
 
       - name: Run backend tests
         shell: pwsh
-        run: .venv\Scripts\python.exe -m pytest -q
+        run: .venv\Scripts\python.exe -m pytest -q --junitxml=pytest-results.xml
+
+      - name: Report backend test failures
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path pytest-results.xml) {
+            [xml]$results = Get-Content pytest-results.xml -Raw
+            foreach ($case in $results.SelectNodes('//testcase[failure or error]')) {
+              Write-Output "::error title=Backend test failed::$($case.classname).$($case.name)"
+            }
+          }
 
       - name: Run frontend checks
         shell: pwsh

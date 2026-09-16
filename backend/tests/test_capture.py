@@ -184,7 +184,7 @@ async def test_attachment_checkpoint_reuses_nonempty_local_file(tmp_path: Path) 
     existing = target_dir / "file.pdf"
     existing.write_bytes(b"pdf")
     messages = [{"id": "1000", "attachments": [{"name": "file.pdf", "url": url}]}]
-    extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+    extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets", avoid_browser_downloads=False)
 
     await extractor._download_attachments(MissingAttachmentCardPage(), channel_id, messages)
 
@@ -200,7 +200,7 @@ async def test_attachment_outside_rendered_batch_stays_pending(tmp_path: Path) -
         "id": "1000",
         "attachments": [{"name": "file.pdf", "url": "https://example.test/file.pdf"}],
     }]
-    extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+    extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets", avoid_browser_downloads=False)
 
     await extractor._download_attachments(MissingAttachmentCardPage(), "ui-channel:one", messages)
 

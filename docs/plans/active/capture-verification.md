@@ -58,3 +58,8 @@ Preserve existing archive/profile. Stop only identified app processes during an 
   download item; invalid or unavailable files remain reported as incomplete.
   Synthetic headed Chrome streaming proof and Linux regression tests pass.
   Windows production verification remains open.
+- Windows 0.3.1 reached three threads without a crash but stalled on a partial
+  file response in a temporary tab. The app had passed `20_000` seconds to
+  `asyncio.wait_for` and could then hang detaching a paused CDP session. Version
+  0.3.2 bounds the stream to 20 seconds and closes the tab directly; a
+  stalled-response regression test verifies cleanup and failure reporting.

@@ -1,8 +1,11 @@
+import asyncio
+import time
 from pathlib import Path
 
 import pytest
 from playwright.async_api import async_playwright
 
+import teams_archive.capture.extractor as extractor_module
 from teams_archive.capture.browser import chrome_executable
 from teams_archive.capture.extractor import (
     FORBIDDEN_ACTION_NAMES,
@@ -336,3 +339,55 @@ async def test_safe_download_fallback_never_uses_browser_download_item(tmp_path:
     attachment = messages[0]["attachments"][0]
     assert attachment["status"] == "local"
     assert Path(attachment["localPath"]).read_bytes() == b"pdf-content"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_stalled_browser_stream_times_out_and_closes_temporary_tab(tmp_path: Path, monkeypatch) -> None:
+    release_response = asyncio.Event()
+    response_started = asyncio.Event()
+
+    async def serve_stalled_file(reader, writer) -> None:
+        await reader.read(4096)
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/octet-stream\r\n"
+            b"Content-Length: 1000000\r\n"
+            b"Content-Disposition: attachment; filename=stalled.bin\r\n\r\npartial"
+        )
+        await writer.drain()
+        response_started.set()
+        await release_response.wait()
+        writer.close()
+
+    server = await asyncio.start_server(serve_stalled_file, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    url = f"http://127.0.0.1:{port}/stalled"
+    monkeypatch.setattr(extractor_module, "trusted_sharepoint_url", lambda value: value == url)
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(channel="chrome", headless=True)
+            context = await browser.new_context(accept_downloads=True)
+            page = await context.new_page()
+            extractor = TeamsDomExtractor(
+                tmp_path / "files", tmp_path / "assets", avoid_browser_downloads=True,
+            )
+            started = time.monotonic()
+            task = asyncio.create_task(extractor._download_via_browser_stream(
+                page, url, tmp_path / "files" / "target", "stalled.bin", timeout_seconds=2.0,
+            ))
+            done, pending = await asyncio.wait({task}, timeout=6.0)
+            release_response.set()
+            if pending:
+                task.cancel()
+            assert done, "a stalled file must not hold the capture task"
+            assert task.result() is None
+            assert response_started.is_set()
+            assert time.monotonic() - started < 6.0
+            assert len(context.pages) == 1
+            assert not list((tmp_path / "files" / "target").glob("*"))
+            await browser.close()
+    finally:
+        release_response.set()
+        server.close()
+        await server.wait_closed()

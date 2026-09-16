@@ -60,6 +60,24 @@ class AddingPostExtractor(ClosingOnceExtractor):
         }
 
 
+class FailedFileExtractor(ClosingOnceExtractor):
+    async def capture_channel(self, _page, _identity, _completed, on_post, _pause_gate):
+        await on_post({
+            "id": "1000", "expectedReplies": 0, "capturedReplies": 0, "countMatches": True,
+            "messages": [{
+                "id": "1000", "text": "root", "html": "", "images": [],
+                "attachments": [{
+                    "id": "file-1", "name": "report.pdf", "status": "failed",
+                    "errorCode": "source-timeout", "localPath": None,
+                }],
+            }],
+        })
+        return {
+            "posts": 1, "expectedReplies": 0, "capturedReplies": 0,
+            "files": 0, "failedFiles": 1, "pendingFiles": 0, "uncertain": 0,
+        }
+
+
 @pytest.mark.asyncio
 async def test_capture_reopens_chrome_and_retries_channel_once(tmp_path) -> None:
     database = ArchiveDatabase(tmp_path / "archive.db")
@@ -116,3 +134,26 @@ async def test_resumed_channel_keeps_durable_progress_counters(tmp_path) -> None
         "posts": 2, "expectedReplies": 3, "capturedReplies": 3,
         "files": 2, "failedFiles": 1, "pendingFiles": 1, "uncertain": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_failed_file_keeps_post_and_marks_channel_partial(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.db")
+    database.initialize()
+    database.upsert_channel({
+        "id": "ui-channel:one", "teamId": "ui-team:one", "teamName": "Client",
+        "displayName": "Legal", "membershipType": "standard", "webUrl": None,
+        "sourceLocator": "source", "identityConfidence": "source_id",
+    })
+    coordinator = CaptureCoordinator(database, RecoveringBrowser(), FailedFileExtractor())
+
+    run_id = await coordinator.start(["ui-channel:one"])
+    await coordinator._task
+
+    progress = database.capture_channel_progress(run_id, "ui-channel:one")
+    assert database.current_capture()["status"] == "partial"
+    assert progress["status"] == "partial"
+    assert progress["posts_completed"] == 1
+    assert progress["files_failed"] == 1
+    with database.connect() as connection:
+        assert connection.execute("SELECT status FROM attachments WHERE id='file-1'").fetchone()[0] == "failed"

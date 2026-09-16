@@ -384,12 +384,34 @@ synthetic HTML preview and file response captured all bytes without a download
 event. The 0.3.1 mitigation needs a real Windows capture before claiming it
 prevents the crash there or preserves full file coverage.
 
+### 15. A stalled file left a temporary `about:blank` tab open in 0.3.1
+
+The 0.3.1 Windows run reached three threads without a Chrome crash, then the
+capture remained `running` for over two minutes while a temporary file tab
+kept loading. A synthetic server that sent response headers and only part of a
+file reproduced the stall without crashing Chrome.
+
+Two app-side waits caused it:
+
+- `asyncio.wait_for(..., timeout=20_000)` interpreted `20_000` as **seconds**;
+  nearby Playwright APIs use milliseconds. A file with no end-of-stream could
+  therefore hold the capture for more than five hours.
+- After a timeout, explicitly detaching the CDP session could itself remain
+  pending while the response was paused.
+
+Version 0.3.2 uses a 20-second stream timeout and closes the temporary page
+directly, which also detaches its CDP session. The stalled-response regression
+test confirms the attempt returns, leaves no temporary tab or completed file,
+and allows the file to be recorded as failed if the fallback also fails. The
+archive keeps file metadata and marks an incomplete channel `partial` rather
+than reporting a complete backup.
+
 ## Validation performed
 
-The 0.3.1 Linux source test run reported:
+The 0.3.2 Linux source test run reported:
 
 ```text
-32 passed
+34 passed
 ```
 
 Earlier checks on the same change series also passed:
@@ -403,8 +425,8 @@ Earlier checks on the same change series also passed:
 - A Mark-of-the-Web simulation for an intermediate build, with no corresponding
   Code Integrity block event.
 
-The 0.3.1 Linux PyInstaller package passed `--self-test`. A previous unsigned
-Windows diagnostic hash was blocked by Smart App Control; the Windows 0.3.1
+The 0.3.2 Linux PyInstaller package passed `--self-test`. A previous unsigned
+Windows diagnostic hash was blocked by Smart App Control; the Windows 0.3.2
 package still needs GitHub Actions build and real Teams capture validation.
 
 These checks cover regressions and packaging. They do not replace the remaining

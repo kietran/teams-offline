@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "teams-offline-archive"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local Chrome-captured Microsoft Teams channel archive for Windows and Linux"
 requires-python = ">=3.12"
 dependencies = [

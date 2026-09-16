@@ -577,6 +577,7 @@ class TeamsDomExtractor:
 
     async def _download_via_browser_stream(
         self, page: Any, url: str, target_dir: Path, fallback_name: str,
+        timeout_seconds: float = 20.0,
     ) -> dict[str, Any] | None:
         """Stream a rendered SharePoint file through Chrome without a download item."""
         if not trusted_sharepoint_url(url):
@@ -680,7 +681,8 @@ class TeamsDomExtractor:
             navigation = asyncio.create_task(
                 download_page.goto(url, wait_until="commit", timeout=15_000)
             )
-            return await asyncio.wait_for(finished, timeout=20_000)
+            # asyncio uses seconds; Playwright's timeout arguments use milliseconds.
+            return await asyncio.wait_for(finished, timeout=timeout_seconds)
         except Exception as exc:
             if "target page, context or browser has been closed" in str(exc).lower():
                 raise
@@ -695,10 +697,8 @@ class TeamsDomExtractor:
                     pass
             for task in handlers:
                 task.cancel()
-            try:
-                await session.detach()
-            except Exception:
-                pass
+            # Closing the temporary page also detaches its CDP session. An
+            # explicit detach can wait forever while a response body is paused.
             await download_page.close()
 
     async def _download_via_browser_navigation(

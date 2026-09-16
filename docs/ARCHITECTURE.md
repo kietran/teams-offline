@@ -35,8 +35,10 @@ Teams rendered DOM
   URL through Chrome DevTools Fetch before Chrome creates a download item. The
   response is written to a temporary local file and atomically moved into the
   archive. If streaming fails, request-context fallback may try the same
-  rendered URL; a failed file remains explicitly reported. This avoids a Chrome
-  152 download-bubble crash path observed in two Windows minidumps.
+  rendered URL; a failed file remains explicitly reported. The stream has a
+  bounded wait and its temporary page is closed even when a response stalls.
+  This avoids a Chrome 152 download-bubble crash path observed in two Windows
+  minidumps.
 - On Linux, file capture still prefers the rendered Teams `Download` action and
   may use Chrome navigation for a rendered SharePoint URL if its UI card cannot
   be driven. URL response paths reject HTML/login pages, empty bodies, and

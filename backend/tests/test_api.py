@@ -40,7 +40,7 @@ async def test_setup_channel_and_capture_api(tmp_path: Path) -> None:
     app=create_app(config, browser, coordinator)
     transport=httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        assert (await client.get("/api/health")).json()["version"] == "0.2.0"
+        assert (await client.get("/api/health")).json()["version"] == "0.3.0"
         assert (await client.post("/api/chrome/open")).json()["signed_in"] is True
         added=(await client.post("/api/channels/current")).json()
         assert added["display_name"] == "Legal"

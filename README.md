@@ -12,7 +12,7 @@ Local Chrome Capture MVP đã có:
 - Capture queue, pause/resume và checkpoint SQLite.
 - Lưu root posts, replies, ảnh và file đính kèm trong posts.
 - Full-text search và archive viewer.
-- Linux portable build; Windows build script chờ chạy trên Windows x64.
+- Linux portable build; GitHub Actions tạo gói Windows x64 sau mỗi lần push lên `main`.
 
 Google Drive và quét toàn bộ tab Shared được hoãn khỏi MVP.
 

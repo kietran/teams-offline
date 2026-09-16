@@ -6,6 +6,7 @@ import mimetypes
 import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from .models import ChannelIdentity
 
@@ -175,8 +176,10 @@ class TeamsDomExtractor:
             }
           }
           const attachments = []; const seen = new Set();
-          for (const node of el.querySelectorAll('[data-tid="file-attachment-grid"] [aria-label*="http"]')) {
-            const label = node.getAttribute('aria-label') || ''; const match = label.match(/https?:\/\/\S+/);
+          for (const grid of el.querySelectorAll('[data-tid="file-attachment-grid"]')) {
+            const nodes = [grid, ...grid.querySelectorAll('[aria-label*="http"]')];
+            const label = nodes.map(node => node.getAttribute('aria-label') || '').find(value => /https?:\/\//.test(value)) || '';
+            const match = label.match(/https?:\/\/\S+/);
             if (!match) continue; const url = match[0]; const name = clean(label.slice(0, match.index));
             if (!seen.has(url)) { seen.add(url); attachments.push({name, url}); }
           }
@@ -201,8 +204,10 @@ class TeamsDomExtractor:
             const avatar = el.querySelector('[data-tid="post-message-header-avatar"][aria-label], [data-tid="reply-message-header-avatar"][aria-label]');
             const explicit = el.querySelector('time[data-tid="timestamp"]')?.getAttribute('aria-label') || null;
             const attachments=[]; const seen=new Set();
-            for (const node of el.querySelectorAll('[data-tid="file-attachment-grid"] [aria-label*="http"]')) {
-              const label=node.getAttribute('aria-label')||''; const match=label.match(/https?:\/\/\S+/);
+            for (const grid of el.querySelectorAll('[data-tid="file-attachment-grid"]')) {
+              const nodes=[grid,...grid.querySelectorAll('[aria-label*="http"]')];
+              const label=nodes.map(node=>node.getAttribute('aria-label')||'').find(value=>/https?:\/\//.test(value))||'';
+              const match=label.match(/https?:\/\/\S+/);
               if(match&&!seen.has(match[0])){seen.add(match[0]);attachments.push({name:clean(label.slice(0,match.index)),url:match[0]});}
             }
             return {id,order:index,author:(avatar?.getAttribute('aria-label')||'').replace(/^Profile picture of /,'').replace(/\.$/,'')||null,
@@ -215,9 +220,12 @@ class TeamsDomExtractor:
     async def _load_thread(
         self,
         page: Any,
+        channel_id: str,
         post_id: str,
         root_message: dict[str, Any],
         expected_replies: int,
+        download_results: dict[str, dict[str, Any]],
+        asset_results: dict[str, dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], int]:
         viewport = page.locator('[data-tid="channel-replies-viewport"]')
         await viewport.wait_for(state="visible", timeout=15_000)
@@ -229,6 +237,8 @@ class TeamsDomExtractor:
         async def harvest() -> None:
             nonlocal discovery_order
             batch = await self._extract_messages(page, '[data-tid="channel-replies-pane-message"]')
+            await self._save_assets(page, channel_id, batch, asset_results)
+            await self._download_attachments(page, channel_id, batch, download_results)
             for message in batch:
                 if message.get("id") == post_id:
                     continue
@@ -253,6 +263,59 @@ class TeamsDomExtractor:
             if stable >= 3 and expected_replies <= 0:
                 break
 
+        def unresolved_urls() -> set[str]:
+            urls = {
+                item.get("url")
+                for _, message in captured.values()
+                for item in message.get("attachments", [])
+                if item.get("url")
+            }
+            return {
+                url for url in urls
+                if not download_results.get(url)
+                or (
+                    download_results[url].get("status") != "local"
+                    and download_results[url].get("attempts", 0) < 2
+                )
+            }
+
+        # Once Teams has loaded the whole virtualized thread, sweep its scroll
+        # range so attachment cards that were detached during the upward load
+        # get another chance to render and download.
+        for _pass in range(2):
+            if not unresolved_urls():
+                break
+            await viewport.evaluate(
+                "el => { el.scrollTop=0; el.dispatchEvent(new Event('scroll',{bubbles:true})); }"
+            )
+            await asyncio.sleep(0.4)
+            for _ in range(80):
+                batch = await self._extract_messages(page, '[data-tid="channel-replies-pane-message"]')
+                await self._save_assets(page, channel_id, batch, asset_results)
+                await self._download_attachments(page, channel_id, batch, download_results)
+                metrics = await viewport.evaluate(
+                    "el => ({top:el.scrollTop, height:el.scrollHeight, client:el.clientHeight})"
+                )
+                bottom = max(0, metrics["height"] - metrics["client"])
+                if metrics["top"] >= bottom - 1:
+                    break
+                next_top = min(bottom, metrics["top"] + max(500, metrics["client"] * 0.75))
+                await viewport.evaluate(
+                    "(el, top) => { el.scrollTop=top; el.dispatchEvent(new Event('scroll',{bubbles:true})); }",
+                    next_top,
+                )
+                await asyncio.sleep(0.4)
+
+        all_messages = [root_message, *[message for _, message in captured.values()]]
+        await self._download_attachment_fallbacks(
+            page, channel_id, all_messages, download_results,
+        )
+        for _, message in captured.values():
+            for item in message.get("attachments", []):
+                result = download_results.get(item.get("url") or "")
+                if result:
+                    item.update({key: value for key, value in result.items() if key != "attempts"})
+
         def reply_order(item: tuple[int, dict[str, Any]]) -> tuple[int, int | str, int]:
             first_seen, message = item
             message_id = message.get("id") or ""
@@ -264,19 +327,36 @@ class TeamsDomExtractor:
         replies = [message for _, message in sorted(captured.values(), key=reply_order)]
         return [{**root_message, "id": post_id, "order": 0}, *replies], stable
 
-    async def _save_assets(self, page: Any, channel_id: str, messages: list[dict[str, Any]]) -> None:
+    async def _save_assets(
+        self,
+        page: Any,
+        channel_id: str,
+        messages: list[dict[str, Any]],
+        results: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        results = results if results is not None else {}
         for message in messages:
-            message_id = message.get("id") or stable_hash(channel_id, str(message.get("order")))[:24]
+            message_id = message.get("id") or message_capture_key(message)
             saved = []
             for index, image in enumerate(message.get("images", [])):
                 src = image.get("src") or ""
                 asset_id = stable_hash(message_id, src or str(index))
+                if asset_id in results:
+                    saved.append({**image, **results[asset_id]})
+                    continue
                 target_dir = self.assets_root / storage_key(channel_id)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 stored = None
                 capture_mode = "original"
                 mime_type = None
-                if src.startswith("http"):
+                existing = next(
+                    (path for path in target_dir.glob(f"{asset_id}.*") if path.is_file() and path.stat().st_size > 0),
+                    None,
+                )
+                if existing:
+                    stored = existing
+                    mime_type = mimetypes.guess_type(existing.name)[0]
+                if stored is None and src.startswith("http"):
                     try:
                         response = await page.context.request.get(src, timeout=15_000)
                         mime_type = (response.headers.get("content-type") or "image/png").split(";", 1)[0]
@@ -294,81 +374,250 @@ class TeamsDomExtractor:
                         mime_type = "image/png"
                         capture_mode = "screenshot"
                 if stored:
-                    saved.append({**image, "id": asset_id, "localPath": str(stored), "sizeBytes": stored.stat().st_size,
-                                  "mimeType": mime_type, "captureMode": capture_mode})
+                    result = {
+                        "id": asset_id, "localPath": str(stored), "sizeBytes": stored.stat().st_size,
+                        "mimeType": mime_type, "captureMode": capture_mode,
+                    }
+                    results[asset_id] = result
+                    saved.append({**image, **result})
             message["images"] = saved
 
-    async def _download_attachments(self, page: Any, channel_id: str, messages: list[dict[str, Any]]) -> tuple[int, int]:
-        by_url = {item["url"]: item for message in messages for item in message.get("attachments", []) if item.get("url")}
-        by_id = {message.get("id"): message for message in messages if message.get("id")}
-        message_by_url: dict[str, dict[str, Any]] = {}
+    async def _download_attachments(
+        self,
+        page: Any,
+        channel_id: str,
+        messages: list[dict[str, Any]],
+        results: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        results = results if results is not None else {}
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if attachment.get("url"):
-                    message_by_url.setdefault(attachment["url"], message)
-        action_buttons = page.locator('[data-tid="file-attachment-grid"]').get_by_role(
-            "button", name="More actions"
-        )
-        downloaded = 0
-        # Teams may virtualize or re-render attachment cards after each menu
-        # action. Walking backwards keeps remaining indexes valid more often,
-        # while the per-item boundary prevents one detached card from failing
-        # the entire channel.
-        for index in reversed(range(await action_buttons.count())):
-            item: dict[str, Any] | None = None
-            try:
-                more = action_buttons.nth(index)
-                group = more.locator("xpath=ancestor::*[@role='group'][1]")
-                metadata = await group.evaluate(r"""el => {
-                  const label=el.getAttribute('aria-label')||'';
-                  const nested=[...el.querySelectorAll('[aria-label*="http"]')].map(node=>node.getAttribute('aria-label')||'');
-                  const source=[label,...nested].find(value=>/https?:\/\//.test(value))||'';
-                  const url=source.match(/https?:\/\/\S+/)?.[0]||null;
-                  let current=el.parentElement; let messageId=null;
-                  while(current&&!messageId){const bodies=current.querySelectorAll('[data-tid="message-body"]');if(bodies.length===1)messageId=bodies[0].id?.match(/content-(\d{10,})/)?.[1]||null;current=current.parentElement;}
-                  return {name:label.trim(),url,messageId};
-                }""", timeout=5_000)
-                name = metadata.get("name") or "attachment"
-                url = metadata.get("url")
-                message = by_id.get(metadata.get("messageId")) or message_by_url.get(url)
-                if not message:
-                    continue
-                item = by_url.get(url) if url else next(
-                    (entry for entry in message.get("attachments", []) if entry.get("name") == name), None
-                )
-                if not item:
-                    item = {"name": name, "url": url}
-                    message.setdefault("attachments", []).append(item)
-                attachment_id = stable_hash(message.get("id") or "", url or f"{name}:{index}")
+            message_id = message.get("id") or message_capture_key(message)
+            for index, item in enumerate(message.get("attachments", [])):
+                url = item.get("url") or ""
+                attachment_id = stable_hash(message_id, url or f"{item.get('name', '')}:{index}")
                 item.update({"id": attachment_id, "captureMode": "download"})
+                cached = results.get(url) if url else None
+                if cached and (cached.get("status") == "local" or cached.get("attempts", 0) >= 2):
+                    item.update({key: value for key, value in cached.items() if key != "attempts"})
+                    item["id"] = attachment_id
+                    continue
                 target_dir = self.files_root / storage_key(channel_id) / attachment_id
                 target_dir.mkdir(parents=True, exist_ok=True)
-                await more.click(timeout=8_000)
-                async with page.expect_download(timeout=20_000) as pending:
-                    await page.get_by_role("menuitem", name="Download").click(timeout=8_000)
-                download = await pending.value
-                target = target_dir / safe_filename(download.suggested_filename or name)
-                await download.save_as(str(target))
-                item.update({"localPath": str(target), "status": "local", "errorCode": None})
-                downloaded += 1
-            except Exception as exc:
-                if item is not None:
-                    item.update({"localPath": None, "status": "failed", "errorCode": type(exc).__name__})
+                existing = next(
+                    (path for path in target_dir.iterdir() if path.is_file() and path.stat().st_size > 0),
+                    None,
+                )
+                if existing:
+                    result = {
+                        "localPath": str(existing), "status": "local", "errorCode": None,
+                        "sizeBytes": existing.stat().st_size,
+                        "mimeType": mimetypes.guess_type(existing.name)[0],
+                    }
+                    results[url] = result
+                    item.update(result)
+                    continue
+                if not url:
+                    item.update({"localPath": None, "status": "failed", "errorCode": "missing-source-url"})
+                    continue
+
+                marker = f"archive-{attachment_id[:24]}"
+                found = await page.evaluate(r"""({url, marker}) => {
+                  for (const grid of document.querySelectorAll('[data-tid="file-attachment-grid"]')) {
+                    const nodes = [grid, ...grid.querySelectorAll('[aria-label]')];
+                    const matches = nodes.some(node => {
+                      const value = node.getAttribute('aria-label') || '';
+                      return value.match(/https?:\/\/\S+/)?.[0] === url;
+                    });
+                    if (matches) {
+                      grid.setAttribute('data-archive-download-key', marker);
+                      return true;
+                    }
+                  }
+                  return false;
+                }""", {"url": url, "marker": marker})
+                if not found:
+                    item.setdefault("status", "pending")
+                    continue
+
+                attempts = int(cached.get("attempts", 0)) if cached else 0
+                phase = "download-button"
                 try:
-                    await page.keyboard.press("Escape")
-                except Exception:
-                    pass
+                    card = page.locator(f'[data-archive-download-key="{marker}"]').first
+                    more_actions = card.get_by_role("button", name="More actions")
+                    if await more_actions.count() == 0:
+                        more_actions = card.locator('button[aria-label=""]').last
+                    await more_actions.click(timeout=3_000)
+                    phase = "download-action"
+                    async with page.expect_download(timeout=8_000) as pending:
+                        await page.get_by_role(
+                            "menuitem", name=re.compile(r"^(Download|Tải xuống)$", re.IGNORECASE)
+                        ).click(timeout=2_000)
+                    phase = "download-event"
+                    download = await pending.value
+                    target = target_dir / safe_filename(download.suggested_filename or item.get("name") or "attachment")
+                    phase = "download-save"
+                    await download.save_as(str(target))
+                    result = {
+                        "localPath": str(target), "status": "local", "errorCode": None,
+                        "sizeBytes": target.stat().st_size,
+                        "mimeType": mimetypes.guess_type(target.name)[0],
+                    }
+                    results[url] = result
+                    item.update(result)
+                except Exception as exc:
+                    result = {
+                        "localPath": None, "status": "failed",
+                        "errorCode": f"{phase}-{type(exc).__name__}",
+                        "attempts": attempts + 1,
+                    }
+                    results[url] = result
+                    item.update({key: value for key, value in result.items() if key != "attempts"})
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+    async def _download_via_browser_navigation(
+        self,
+        page: Any,
+        url: str,
+        target_dir: Path,
+        fallback_name: str,
+    ) -> dict[str, Any] | None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        download_page = await page.context.new_page()
+        try:
+            async with download_page.expect_download(timeout=12_000) as pending:
+                try:
+                    await download_page.goto(url, wait_until="commit", timeout=12_000)
+                except Exception as exc:
+                    if "download is starting" not in str(exc).lower():
+                        raise
+            download = await pending.value
+            target = target_dir / safe_filename(download.suggested_filename or fallback_name or "attachment")
+            await download.save_as(str(target))
+            if not target.is_file() or target.stat().st_size <= 0:
+                raise RuntimeError("browser-download-empty")
+            return {
+                "localPath": str(target), "status": "local", "errorCode": None,
+                "sizeBytes": target.stat().st_size,
+                "mimeType": mimetypes.guess_type(target.name)[0],
+                "captureMode": "browser-navigation",
+            }
+        except Exception:
+            return None
+        finally:
+            await download_page.close()
+
+    async def _download_attachment_fallbacks(
+        self,
+        page: Any,
+        channel_id: str,
+        messages: list[dict[str, Any]],
+        results: dict[str, dict[str, Any]],
+    ) -> None:
+        """Fetch rendered SharePoint file URLs when their UI card cannot be driven."""
         for message in messages:
-            for item in message.get("attachments", []):
-                item.setdefault("id", stable_hash(message.get("id") or "", item.get("url") or item.get("name") or ""))
-                item.setdefault("status", "pending")
-                item.setdefault("captureMode", "download")
-        failed = sum(
-            item.get("status") != "local"
-            for message in messages
-            for item in message.get("attachments", [])
-        )
-        return downloaded, failed
+            message_id = message.get("id") or message_capture_key(message)
+            for index, item in enumerate(message.get("attachments", [])):
+                url = item.get("url") or ""
+                cached = results.get(url)
+                if cached and cached.get("status") == "local":
+                    item.update({key: value for key, value in cached.items() if key != "attempts"})
+                    continue
+                attachment_id = stable_hash(message_id, url or f"{item.get('name', '')}:{index}")
+                item.update({"id": attachment_id, "captureMode": "rendered-url"})
+                target_dir = self.files_root / storage_key(channel_id) / attachment_id
+                target_dir.mkdir(parents=True, exist_ok=True)
+                existing = next(
+                    (path for path in target_dir.iterdir() if path.is_file() and path.stat().st_size > 0),
+                    None,
+                )
+                if existing:
+                    result = {
+                        "localPath": str(existing), "status": "local", "errorCode": None,
+                        "sizeBytes": existing.stat().st_size,
+                        "mimeType": mimetypes.guess_type(existing.name)[0],
+                        "captureMode": "rendered-url",
+                    }
+                    results[url] = result
+                    item.update(result)
+                    continue
+
+                parsed = urlparse(url)
+                if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith(".sharepoint.com"):
+                    result = {
+                        "localPath": None, "status": "failed", "errorCode": "unsupported-file-host",
+                        "attempts": 2, "captureMode": "rendered-url",
+                    }
+                    results[url] = result
+                    item.update({key: value for key, value in result.items() if key != "attempts"})
+                    continue
+
+                navigation_result = await self._download_via_browser_navigation(
+                    page, url, target_dir, item.get("name") or "attachment",
+                )
+                if navigation_result:
+                    results[url] = navigation_result
+                    item.update(navigation_result)
+                    continue
+
+                try:
+                    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                    query["download"] = "1"
+                    download_url = urlunparse(parsed._replace(query=urlencode(query)))
+                    response = None
+                    body = b""
+                    mime_type = "application/octet-stream"
+                    last_error = "source-returned-html"
+                    for candidate_url in dict.fromkeys((download_url, url)):
+                        candidate = await page.context.request.get(candidate_url, timeout=30_000)
+                        candidate_type = (
+                            candidate.headers.get("content-type") or "application/octet-stream"
+                        ).split(";", 1)[0]
+                        if not candidate.ok:
+                            last_error = f"source-http-{candidate.status}"
+                            continue
+                        if candidate_type in {"text/html", "application/xhtml+xml"}:
+                            last_error = "source-returned-html"
+                            continue
+                        candidate_body = await candidate.body()
+                        if not candidate_body:
+                            last_error = "source-empty"
+                            continue
+                        response = candidate
+                        body = candidate_body
+                        mime_type = candidate_type
+                        break
+                    if response is None:
+                        raise RuntimeError(last_error)
+                    disposition = response.headers.get("content-disposition") or ""
+                    filename_match = re.search(
+                        r"filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)", disposition, re.IGNORECASE,
+                    )
+                    response_name = unquote(next(
+                        (group for group in filename_match.groups() if group), ""
+                    )) if filename_match else ""
+                    url_name = unquote(Path(parsed.path).name)
+                    target = target_dir / safe_filename(response_name or item.get("name") or url_name or "attachment")
+                    target.write_bytes(body)
+                    result = {
+                        "localPath": str(target), "status": "local", "errorCode": None,
+                        "sizeBytes": target.stat().st_size, "mimeType": mime_type,
+                        "captureMode": "rendered-url",
+                    }
+                    results[url] = result
+                    item.update(result)
+                except Exception as exc:
+                    error_code = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
+                    result = {
+                        "localPath": None, "status": "failed", "errorCode": error_code,
+                        "attempts": 2, "captureMode": "rendered-url",
+                    }
+                    if cached and cached.get("errorCode"):
+                        result["uiErrorCode"] = cached["errorCode"]
+                    results[url] = result
+                    item.update({key: value for key, value in result.items() if key != "attempts"})
 
     async def capture_channel(
         self,
@@ -382,7 +631,10 @@ class TeamsDomExtractor:
         await viewport.evaluate("el => { el.scrollTop=el.scrollHeight; el.dispatchEvent(new Event('scroll',{bubbles:true})); }")
         await asyncio.sleep(1.0)
         captured: set[str] = set()
-        totals = {"posts": 0, "expectedReplies": 0, "capturedReplies": 0, "files": 0, "failedFiles": 0, "uncertain": 0}
+        totals = {
+            "posts": 0, "expectedReplies": 0, "capturedReplies": 0,
+            "files": 0, "failedFiles": 0, "pendingFiles": 0, "uncertain": 0,
+        }
         stable_rounds = 0
         for _ in range(60):
             summaries = await self._root_summaries(page)
@@ -398,6 +650,8 @@ class TeamsDomExtractor:
                 expected = int(summary.get("expectedReplies") or 0)
                 messages: list[dict[str, Any]] = []
                 stable = 0
+                download_results: dict[str, dict[str, Any]] = {}
+                asset_results: dict[str, dict[str, Any]] = {}
                 if expected and summary.get("hasReplyButton"):
                     root_candidates = await self._extract_messages(page, f"#reply-chain-summary-{post_id}")
                     root_message = next(
@@ -406,28 +660,41 @@ class TeamsDomExtractor:
                     )
                     if root_message is None:
                         raise RuntimeError("root-message-not-found")
+                    await self._save_assets(page, identity.id, [root_message], asset_results)
+                    await self._download_attachments(page, identity.id, [root_message], download_results)
                     for _attempt in range(3):
                         root = page.locator(f"#reply-chain-summary-{post_id}")
                         await root.locator('[data-tid="response-summary-button"]').click(timeout=10_000)
-                        messages, stable = await self._load_thread(page, post_id, root_message, expected)
+                        messages, stable = await self._load_thread(
+                            page, identity.id, post_id, root_message, expected,
+                            download_results, asset_results,
+                        )
                         if len(messages) - 1 == expected:
                             break
                         await page.locator('[data-tid="close-l2-view-button"]').click()
                         await asyncio.sleep(0.5)
-                    await self._save_assets(page, identity.id, messages)
-                    files, failed_files = await self._download_attachments(page, identity.id, messages)
                     if await page.locator('[data-tid="close-l2-view-button"]').count():
                         await page.locator('[data-tid="close-l2-view-button"]').click()
                         await asyncio.sleep(0.5)
                 elif expected:
                     messages = await self._extract_inline_messages(page, post_id)
-                    await self._save_assets(page, identity.id, messages)
-                    files, failed_files = await self._download_attachments(page, identity.id, messages)
+                    await self._save_assets(page, identity.id, messages, asset_results)
+                    await self._download_attachments(page, identity.id, messages, download_results)
+                    await self._download_attachment_fallbacks(
+                        page, identity.id, messages, download_results,
+                    )
                 else:
                     root = page.locator(f"#reply-chain-summary-{post_id}")
                     messages = await self._extract_messages(page, f"#reply-chain-summary-{post_id}")
-                    await self._save_assets(page, identity.id, messages)
-                    files, failed_files = await self._download_attachments(page, identity.id, messages)
+                    await self._save_assets(page, identity.id, messages, asset_results)
+                    await self._download_attachments(page, identity.id, messages, download_results)
+                    await self._download_attachment_fallbacks(
+                        page, identity.id, messages, download_results,
+                    )
+                attachments = [item for message in messages for item in message.get("attachments", [])]
+                files = sum(item.get("status") == "local" for item in attachments)
+                failed_files = sum(item.get("status") == "failed" for item in attachments)
+                pending_files = sum(item.get("status", "pending") == "pending" for item in attachments)
                 captured_replies = max(0, len(messages) - 1)
                 matches = captured_replies == expected
                 post = {"id": post_id, "expectedReplies": expected, "capturedReplies": captured_replies,
@@ -438,6 +705,7 @@ class TeamsDomExtractor:
                 totals["capturedReplies"] += captured_replies
                 totals["files"] += files
                 totals["failedFiles"] += failed_files
+                totals["pendingFiles"] += pending_files
                 totals["uncertain"] += int(not matches)
                 added += 1
             stable_rounds = stable_rounds + 1 if added == 0 else 0

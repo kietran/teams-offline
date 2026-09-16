@@ -7,7 +7,7 @@ Date: 2026-09-14
 - React/Vite/TypeScript frontend served by FastAPI at `127.0.0.1:8765`.
 - Python Playwright controls Google Chrome Stable in a dedicated persistent
   profile; Teams credentials stay in Chrome.
-- SQLite schema v2 stores selected channels, normalized threads, FTS5 search,
+- SQLite schema v3 stores selected channels, normalized threads, FTS5 search,
   attachments/assets, capture runs and per-post checkpoints.
 - Local files live under the platform user-data directory. No Microsoft Graph,
   MSAL, Google Drive or browser extension is in the MVP runtime.
@@ -19,7 +19,7 @@ Teams rendered DOM
   → harvest root/reply batches
   → sanitize HTML + normalize IDs
   → atomic per-post SQLite upsert
-  → authenticated UI download / image capture
+  → authenticated UI download / Chrome navigation fallback / image capture
   → local files + capture evidence
   → React archive/search
 ```
@@ -31,6 +31,10 @@ Teams rendered DOM
 - Composer, send, share, edit and delete actions are forbidden.
 - The app never reads browser cookies/tokens into application data or calls
   undocumented Teams endpoints.
+- File capture prefers the rendered Teams `Download` action. If a virtualized
+  card cannot be driven, Chrome may navigate the rendered HTTPS SharePoint URL
+  and capture the resulting browser download; a final request-context fallback
+  rejects HTML/login pages and empty bodies.
 - One capture run owns the Chrome page at a time; channels are sequential.
 - Every post commits independently. Startup marks an in-flight run interrupted;
   resume skips completed post IDs.

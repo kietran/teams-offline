@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import __version__
 from .capture.browser import ChromeSessionManager
 from .capture.extractor import TeamsDomExtractor
 from .capture.service import CaptureCoordinator
@@ -62,12 +63,12 @@ def create_app(
         if shutdown:
             await shutdown()
 
-    app = FastAPI(title=APP_NAME, version="0.2.0", docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title=APP_NAME, version=__version__, docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
     app.state.services = services
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.2.0"}
+        return {"status": "ok", "version": __version__}
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:

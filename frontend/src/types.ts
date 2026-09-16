@@ -27,6 +27,8 @@ export type CaptureChannel = {
   expected_replies: number
   captured_replies: number
   files_captured: number
+  files_failed: number
+  files_pending: number
   error_message: string | null
 }
 

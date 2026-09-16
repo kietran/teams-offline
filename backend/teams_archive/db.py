@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ACTIVE_RUN_STATES = ("queued", "running", "paused", "interrupted")
 
 SCHEMA = """
@@ -90,7 +90,10 @@ CREATE TABLE IF NOT EXISTS capture_channel_runs (
     channel_id TEXT NOT NULL REFERENCES channels(id), status TEXT NOT NULL,
     posts_seen INTEGER NOT NULL DEFAULT 0, posts_completed INTEGER NOT NULL DEFAULT 0,
     expected_replies INTEGER NOT NULL DEFAULT 0, captured_replies INTEGER NOT NULL DEFAULT 0,
-    files_captured INTEGER NOT NULL DEFAULT 0, error_code TEXT, error_message TEXT,
+    files_captured INTEGER NOT NULL DEFAULT 0,
+    files_failed INTEGER NOT NULL DEFAULT 0,
+    files_pending INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT, error_message TEXT,
     updated_at TEXT NOT NULL, PRIMARY KEY(run_id, channel_id)
 );
 CREATE TABLE IF NOT EXISTS capture_post_runs (
@@ -156,6 +159,8 @@ class ArchiveDatabase:
             self._ensure_column(connection, "attachments", "capture_mode", "TEXT NOT NULL DEFAULT 'download'")
             self._ensure_column(connection, "hosted_assets", "source_url", "TEXT")
             self._ensure_column(connection, "hosted_assets", "capture_mode", "TEXT NOT NULL DEFAULT 'original'")
+            self._ensure_column(connection, "capture_channel_runs", "files_failed", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "capture_channel_runs", "files_pending", "INTEGER NOT NULL DEFAULT 0")
             row = connection.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
             if row is None:
                 connection.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
@@ -272,7 +277,10 @@ class ArchiveDatabase:
             )
 
     def update_channel_run(self, run_id: str, channel_id: str, **values: Any) -> None:
-        allowed = {"status", "posts_seen", "posts_completed", "expected_replies", "captured_replies", "files_captured", "error_code", "error_message"}
+        allowed = {
+            "status", "posts_seen", "posts_completed", "expected_replies", "captured_replies",
+            "files_captured", "files_failed", "files_pending", "error_code", "error_message",
+        }
         selected = {key: value for key, value in values.items() if key in allowed}
         selected["updated_at"] = utc_now()
         assignments = ", ".join(f"{key}=?" for key in selected)
@@ -281,6 +289,20 @@ class ArchiveDatabase:
                 f"UPDATE capture_channel_runs SET {assignments} WHERE run_id=? AND channel_id=?",
                 (*selected.values(), run_id, channel_id),
             )
+
+    def capture_channel_progress(self, run_id: str, channel_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT r.*,
+                     (SELECT COUNT(*) FROM capture_post_runs p
+                      WHERE p.run_id=r.run_id AND p.channel_id=r.channel_id
+                        AND COALESCE(p.count_matches, 0)=0) AS uncertain
+                   FROM capture_channel_runs r WHERE r.run_id=? AND r.channel_id=?""",
+                (run_id, channel_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError((run_id, channel_id))
+        return dict(row)
 
     def completed_post_ids(self, run_id: str) -> set[str]:
         with self.connect() as connection:
@@ -332,15 +354,17 @@ class ArchiveDatabase:
                 for attachment in message.get("attachments", []):
                     connection.execute(
                         """INSERT INTO attachments(
-                               id, message_id, channel_id, name, source_url, local_cache_path,
-                               status, error_code, updated_at, capture_mode
-                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               id, message_id, channel_id, name, mime_type, size_bytes,
+                               source_url, local_cache_path, status, error_code, updated_at, capture_mode
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                             mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
                              source_url=excluded.source_url, local_cache_path=excluded.local_cache_path,
                              status=excluded.status, error_code=excluded.error_code,
                              updated_at=excluded.updated_at, capture_mode=excluded.capture_mode""",
                         (
                             attachment["id"], message_id, channel_id, attachment.get("name") or "Tệp đính kèm",
+                            attachment.get("mimeType"), attachment.get("sizeBytes"),
                             attachment.get("url"), attachment.get("localPath"), attachment.get("status", "pending"),
                             attachment.get("errorCode"), now, attachment.get("captureMode", "download"),
                         ),

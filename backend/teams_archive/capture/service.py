@@ -89,7 +89,15 @@ class CaptureCoordinator:
         page = await self.browser.page()
         await self.extractor.navigate_to_channel(page, channel["team_name"], channel["display_name"])
         completed = self.database.completed_post_ids(run_id)
-        counters = {"posts": 0, "expected": 0, "captured": 0, "files": 0}
+        progress = self.database.capture_channel_progress(run_id, channel_id)
+        counters = {
+            "posts": progress["posts_completed"],
+            "expected": progress["expected_replies"],
+            "captured": progress["captured_replies"],
+            "files": progress["files_captured"],
+            "failed_files": progress["files_failed"],
+            "pending_files": progress["files_pending"],
+        }
 
         async def on_post(post: dict[str, Any]) -> None:
             sanitized = sanitize_post(post)
@@ -102,20 +110,44 @@ class CaptureCoordinator:
                 for message in post.get("messages", [])
                 for item in message.get("attachments", [])
             )
+            counters["failed_files"] += sum(
+                item.get("status") == "failed"
+                for message in post.get("messages", [])
+                for item in message.get("attachments", [])
+            )
+            counters["pending_files"] += sum(
+                item.get("status", "pending") == "pending"
+                for message in post.get("messages", [])
+                for item in message.get("attachments", [])
+            )
             self.database.update_channel_run(
                 run_id, channel_id, status="running", posts_seen=counters["posts"],
                 posts_completed=counters["posts"], expected_replies=counters["expected"],
                 captured_replies=counters["captured"], files_captured=counters["files"],
+                files_failed=counters["failed_files"], files_pending=counters["pending_files"],
             )
 
         identity = await self.extractor.discover_current_channel(page)
-        return await self.extractor.capture_channel(
+        await self.extractor.capture_channel(
             page, identity, completed, on_post, lambda: self._pause_gate(run_id),
         )
+        current = self.database.capture_channel_progress(run_id, channel_id)
+        return {
+            "posts": current["posts_completed"],
+            "expectedReplies": current["expected_replies"],
+            "capturedReplies": current["captured_replies"],
+            "files": current["files_captured"],
+            "failedFiles": current["files_failed"],
+            "pendingFiles": current["files_pending"],
+            "uncertain": current["uncertain"],
+        }
 
     async def _run(self, run_id: str) -> None:
         failures = 0
-        totals = {"channels": 0, "posts": 0, "expectedReplies": 0, "capturedReplies": 0, "files": 0, "failedFiles": 0, "uncertain": 0}
+        totals = {
+            "channels": 0, "posts": 0, "expectedReplies": 0, "capturedReplies": 0,
+            "files": 0, "failedFiles": 0, "pendingFiles": 0, "uncertain": 0,
+        }
         try:
             self.database.update_run(run_id, "running")
             for channel_id in self.database.capture_channel_ids(run_id):
@@ -133,11 +165,19 @@ class CaptureCoordinator:
                                 await self.browser.reopen()
                                 continue
                             raise
-                    channel_status = "partial" if result["uncertain"] or result["failedFiles"] else "completed"
+                    incomplete_files = result["failedFiles"] or result["pendingFiles"]
+                    channel_status = "partial" if result["uncertain"] or incomplete_files else "completed"
+                    file_message = None
+                    if incomplete_files:
+                        file_message = (
+                            f"{result['failedFiles']} tệp tải lỗi · "
+                            f"{result['pendingFiles']} tệp chưa được thử tải."
+                        )
                     self.database.update_channel_run(
                         run_id, channel_id, status=channel_status,
-                        error_code="attachment-failures" if result["failedFiles"] else None,
-                        error_message=f"{result['failedFiles']} tệp cần thử lại." if result["failedFiles"] else None,
+                        files_failed=result["failedFiles"], files_pending=result["pendingFiles"],
+                        error_code="attachment-incomplete" if incomplete_files else None,
+                        error_message=file_message,
                     )
                     with self.database.connect() as connection:
                         connection.execute(
@@ -145,7 +185,10 @@ class CaptureCoordinator:
                             (channel_status, datetime.now(timezone.utc).isoformat(), channel_id),
                         )
                     totals["channels"] += 1
-                    for key in ("posts", "expectedReplies", "capturedReplies", "files", "failedFiles", "uncertain"):
+                    for key in (
+                        "posts", "expectedReplies", "capturedReplies", "files",
+                        "failedFiles", "pendingFiles", "uncertain",
+                    ):
                         totals[key] += result[key]
                     failures += int(channel_status == "partial")
                 except Exception as exc:

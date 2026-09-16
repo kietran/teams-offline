@@ -59,7 +59,7 @@ Google Chrome, then provides an offline searchable archive.
   run added 1 post; rerun added 0, updated 1, and retained exactly 1 post.
 - [x] Validate the checkpoint rejects an incoming capture from a different
   channel instead of silently mixing data.
-- [x] Implement the selected-channel queue, pause/resume, schema v2, local API,
+- [x] Implement the selected-channel queue, pause/resume, schema v3, local API,
   archive search/viewer and local attachment opening.
 - [x] Build and smoke-test the Linux x86_64 portable package.
 - [x] Build and smoke-test the Windows x64 portable package on Windows.
@@ -96,7 +96,7 @@ application-data directory.
 
 ## Local MVP Implementation Result
 
-- Schema v2, normalized capture persistence, FTS5 archive search, per-run,
+- Schema v3, normalized capture persistence, FTS5 archive search, per-run,
   per-channel and per-post checkpoints implemented with v1 migration.
 - Production Playwright Python session opens Google Chrome Stable, detects
   sign-in without blocking API status, navigates virtualized channels through
@@ -131,11 +131,10 @@ application-data directory.
   Control allowed an intermediate console build but blocked one unsigned GUI
   hash, so trusted code signing remains a release requirement for predictable
   distribution.
-- Linux production capture on the 00728 channel now completes 5 root posts and
-  matches all 396 displayed replies, including a 281-reply virtualized thread
-  and four ID-less tombstones. It downloads 31 files without a channel-level
-  crash; 127 attachment references remain pending, so full attachment traversal
-  is still open.
+- Linux production verification now covers three channels: 10 root posts,
+  587/587 displayed replies, 151/151 attachment references, and 18/18 hosted
+  images. All recorded files/assets are non-empty, all three runs completed with
+  zero failed/pending files, and an idempotent rerun did not add database rows.
 - Remaining: run the final Windows revision across one complete selected channel
   and verify posts, replies, downloaded files, offline opening, and idempotency
   before closing this plan.

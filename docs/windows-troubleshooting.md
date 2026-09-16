@@ -14,10 +14,9 @@ builds, not verified releases.
 - Backend tests, frontend tests, lint, frontend production build, PyInstaller
   build, packaged self-test, and local health checks have passed at different
   stages of the investigation.
-- A complete production capture of one selected Teams channel has **not** been
-  demonstrated on the final revision. Do not describe the final revision as
-  end-to-end verified until that run checks posts, reply counts, attachments,
-  local files, and archive opening.
+- Linux production capture is verified on three selected Teams channels. The
+  exact final Windows package still requires a smoke run before describing the
+  Windows artifact as end-to-end verified.
 - GitHub Actions builds are unsigned. Removing the known blocked native module
   reduces Smart App Control failures, but it does not provide the guarantee of
   a trusted code-signing certificate.
@@ -298,19 +297,47 @@ Repository fix:
 - Only recognize source URLs inside a Teams file-attachment grid; ordinary
   links and URL previews are no longer treated as files.
 
-Limit:
+Follow-up fix:
 
-The verified run downloaded 31 files but left 127 attachment references pending
-because file cards outside the final rendered virtualized batch cannot yet be
-revisited. Content completeness is proven for that run; attachment completeness
-is not.
+Attachment capture now runs inside each rendered batch and performs a bounded
+top-to-bottom sweep after the thread is loaded. Pending references are reported
+separately from attempted failures.
+
+### 13. SharePoint links returned HTML instead of file bytes
+
+Observed error:
+
+```text
+source-returned-html
+```
+
+Cause:
+
+Some rendered SharePoint document URLs start a download when navigated by
+Chrome, but the same URL returns an HTML preview through request context, even
+with `download=1`.
+
+Repository fix:
+
+- Keep the Teams menu action as the first choice.
+- Support legacy file cards whose menu button has an empty accessible name.
+- If the card cannot be driven, open the rendered HTTPS SharePoint URL in a
+  temporary Chrome page and capture its browser download event.
+- Retain `download=1` request context only as a final fallback; reject HTML,
+  empty responses, non-HTTPS URLs, and non-SharePoint hosts.
+- Persist downloaded files immediately at deterministic paths so restart and
+  rerun reuse them without redownloading.
+
+Linux production evidence across three channels: 10/10 roots, 587/587 replies,
+151/151 attachment references, 18/18 hosted images, zero failed/pending files,
+and every local path non-empty.
 
 ## Validation performed
 
 The latest source test run before this document reported:
 
 ```text
-19 passed
+26 passed
 ```
 
 Earlier checks on the same change series also passed:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import mimetypes
 import re
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
@@ -17,6 +20,32 @@ CHANNEL_SURFACE_SELECTOR = (
     '[data-tid="channel-pane-message"], [id^="reply-chain-summary-"]'
 )
 CHANNEL_MESSAGE_SELECTOR = '[data-tid="channel-pane-message"], [id^="reply-chain-summary-"]'
+TEAMS_HOSTS = {"teams.cloud.microsoft", "teams.microsoft.com"}
+
+
+def trusted_teams_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme == "https" and parsed.hostname in TEAMS_HOSTS
+            and parsed.username is None and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        return False
+
+
+def trusted_sharepoint_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme == "https" and bool(parsed.hostname)
+            and parsed.hostname.endswith(".sharepoint.com")
+            and parsed.username is None and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        return False
 
 
 def stable_hash(*parts: str) -> str:
@@ -55,9 +84,15 @@ def team_from_title(page_title: str, channel_name: str) -> str:
 
 
 class TeamsDomExtractor:
-    def __init__(self, files_root: Path, assets_root: Path) -> None:
+    def __init__(
+        self, files_root: Path, assets_root: Path,
+        avoid_browser_downloads: bool | None = None,
+    ) -> None:
         self.files_root = files_root
         self.assets_root = assets_root
+        self.avoid_browser_downloads = (
+            sys.platform == "win32" if avoid_browser_downloads is None else avoid_browser_downloads
+        )
 
     async def _channel_viewport(self, page: Any) -> Any:
         """Find the channel scroller without depending on one Teams DOM version."""
@@ -87,11 +122,55 @@ class TeamsDomExtractor:
             await asyncio.sleep(0.25)
         return surface
 
-    async def navigate_to_channel(self, page: Any, team_name: str, channel_name: str) -> None:
-        current_node = page.locator('[data-tid="channelTitle-text"]')
-        current = await current_node.first.text_content(timeout=1_000) if await current_node.count() else None
-        if current and current.strip() == channel_name:
+    async def navigate_to_channel(
+        self, page: Any, team_name: str, channel_name: str,
+        web_url: str | None = None, source_locator: str | None = None,
+    ) -> None:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        async def at_target() -> bool:
+            title_node = page.locator('[data-tid="channelTitle-text"]').first
+            if not await title_node.count():
+                return False
+            current = (await title_node.text_content(timeout=1_000) or "").strip()
+            if current != channel_name:
+                return False
+            if source_locator:
+                observed = await page.evaluate(r"""() => {
+                  const id = document.querySelector('[data-tid="response-surface"][id^="response-surface-"]')?.id;
+                  return id ? id.slice('response-surface-'.length) : null;
+                }""")
+                if observed and observed != source_locator:
+                    return False
+            visible_team = team_from_title(await page.title(), current)
+            return visible_team == "Teams" or visible_team == team_name
+
+        if await at_target():
             return
+
+        # A reopened Chrome profile starts on Teams home, and its channel tree
+        # may not exist yet. A saved Teams URL is the most reliable route back.
+        if web_url and trusted_teams_url(web_url):
+            try:
+                await page.goto(web_url, wait_until="domcontentloaded", timeout=30_000)
+            except PlaywrightTimeoutError:
+                pass
+            try:
+                await page.locator('[data-tid="channelTitle-text"]').first.wait_for(
+                    state="visible", timeout=30_000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+            if await at_target():
+                return
+
+        try:
+            await page.locator('[data-tid="experience-layout"]').first.wait_for(
+                state="visible", timeout=45_000,
+            )
+        except PlaywrightTimeoutError as exc:
+            raise RuntimeError("channel-not-visible") from exc
+
         tree_items = page.get_by_role("treeitem").filter(has_text=channel_name)
         for index in range(await tree_items.count()):
             item = tree_items.nth(index)
@@ -99,7 +178,8 @@ class TeamsDomExtractor:
             if team_name in label or await tree_items.count() == 1:
                 await item.click(timeout=10_000)
                 await page.locator('[data-tid="channelTitle-text"]').filter(has_text=channel_name).wait_for(timeout=15_000)
-                return
+                if await at_target():
+                    return
         await page.keyboard.press("Control+Alt+G")
         combobox = page.get_by_role("combobox", name=re.compile("chat or channel", re.IGNORECASE))
         try:
@@ -113,7 +193,8 @@ class TeamsDomExtractor:
                 if await candidate.is_visible() and (team_name in label or await candidates.count() == 1):
                     await candidate.click(timeout=8_000)
                     await page.locator('[data-tid="channelTitle-text"]').filter(has_text=channel_name).wait_for(timeout=15_000)
-                    return
+                    if await at_target():
+                        return
         except Exception:
             pass
         await page.keyboard.press("Escape")
@@ -420,6 +501,23 @@ class TeamsDomExtractor:
                     item.update({"localPath": None, "status": "failed", "errorCode": "missing-source-url"})
                     continue
 
+                if self.avoid_browser_downloads:
+                    result = await self._download_via_browser_stream(
+                        page, url, target_dir, item.get("name") or "attachment",
+                    )
+                    if result:
+                        results[url] = result
+                        item.update(result)
+                    else:
+                        attempts = int(cached.get("attempts", 0)) if cached else 0
+                        result = {
+                            "localPath": None, "status": "failed",
+                            "errorCode": "browser-stream-unavailable", "attempts": attempts + 1,
+                        }
+                        results[url] = result
+                        item.update({key: value for key, value in result.items() if key != "attempts"})
+                    continue
+
                 marker = f"archive-{attachment_id[:24]}"
                 found = await page.evaluate(r"""({url, marker}) => {
                   for (const grid of document.querySelectorAll('[data-tid="file-attachment-grid"]')) {
@@ -476,6 +574,132 @@ class TeamsDomExtractor:
                         await page.keyboard.press("Escape")
                     except Exception:
                         pass
+
+    async def _download_via_browser_stream(
+        self, page: Any, url: str, target_dir: Path, fallback_name: str,
+    ) -> dict[str, Any] | None:
+        """Stream a rendered SharePoint file through Chrome without a download item."""
+        if not trusted_sharepoint_url(url):
+            return None
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        download_page = await page.context.new_page()
+        session = await page.context.new_cdp_session(download_page)
+        loop = asyncio.get_running_loop()
+        finished: asyncio.Future[dict[str, Any]] = loop.create_future()
+        handlers: set[asyncio.Task[None]] = set()
+        navigation: asyncio.Task[Any] | None = None
+
+        async def handle_response(event: dict[str, Any]) -> None:
+            request_id = event["requestId"]
+            headers = {
+                header["name"].lower(): header["value"]
+                for header in event.get("responseHeaders", [])
+            }
+            mime_type = headers.get("content-type", "application/octet-stream").split(";", 1)[0].lower()
+            status = int(event.get("responseStatusCode") or 0)
+            response_url = event.get("request", {}).get("url", "")
+            if (
+                status != 200 or not trusted_sharepoint_url(response_url)
+                or mime_type in {"text/html", "application/xhtml+xml"}
+            ):
+                try:
+                    await session.send("Fetch.continueRequest", {"requestId": request_id})
+                except Exception as exc:
+                    if not finished.done():
+                        finished.set_exception(exc)
+                return
+
+            temporary: Path | None = None
+            stream_handle: str | None = None
+            try:
+                stream_handle = (await session.send(
+                    "Fetch.takeResponseBodyAsStream", {"requestId": request_id}
+                ))["stream"]
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", prefix=".archive-download-", dir=self.files_root, delete=False,
+                ) as output:
+                    temporary = Path(output.name)
+                    while True:
+                        chunk = await session.send("IO.read", {"handle": stream_handle, "size": 65536})
+                        body = (
+                            base64.b64decode(chunk["data"])
+                            if chunk.get("base64Encoded") else chunk["data"].encode()
+                        )
+                        output.write(body)
+                        if chunk["eof"]:
+                            break
+                if temporary.stat().st_size == 0:
+                    raise RuntimeError("source-empty")
+                with temporary.open("rb") as check:
+                    if check.read(256).lstrip().lower().startswith((b"<!doctype html", b"<html")):
+                        raise RuntimeError("source-returned-html")
+                disposition = headers.get("content-disposition", "")
+                filename_match = re.search(
+                    r"filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)", disposition, re.IGNORECASE,
+                )
+                response_name = unquote(next(
+                    (group for group in filename_match.groups() if group), ""
+                )) if filename_match else ""
+                target = target_dir / safe_filename(response_name or fallback_name)
+                temporary.replace(target)
+                temporary = None
+                result = {
+                    "localPath": str(target), "status": "local", "errorCode": None,
+                    "sizeBytes": target.stat().st_size, "mimeType": mime_type,
+                    "captureMode": "browser-stream",
+                }
+                await session.send("Fetch.fulfillRequest", {
+                    "requestId": request_id, "responseCode": 204, "body": "",
+                    "responseHeaders": [{"name": "Content-Length", "value": "0"}],
+                })
+                if not finished.done():
+                    finished.set_result(result)
+            except Exception as exc:
+                if not finished.done():
+                    finished.set_exception(exc)
+            finally:
+                if stream_handle:
+                    try:
+                        await session.send("IO.close", {"handle": stream_handle})
+                    except Exception:
+                        pass
+                if temporary:
+                    temporary.unlink(missing_ok=True)
+
+        def on_response(event: dict[str, Any]) -> None:
+            task = asyncio.create_task(handle_response(event))
+            handlers.add(task)
+            task.add_done_callback(handlers.discard)
+
+        session.on("Fetch.requestPaused", on_response)
+        try:
+            await session.send("Fetch.enable", {"patterns": [{
+                "urlPattern": "*", "resourceType": "Document", "requestStage": "Response",
+            }]})
+            navigation = asyncio.create_task(
+                download_page.goto(url, wait_until="commit", timeout=15_000)
+            )
+            return await asyncio.wait_for(finished, timeout=20_000)
+        except Exception as exc:
+            if "target page, context or browser has been closed" in str(exc).lower():
+                raise
+            return None
+        finally:
+            if navigation:
+                if not navigation.done():
+                    navigation.cancel()
+                try:
+                    await navigation
+                except (asyncio.CancelledError, Exception):
+                    pass
+            for task in handlers:
+                task.cancel()
+            try:
+                await session.detach()
+            except Exception:
+                pass
+            await download_page.close()
 
     async def _download_via_browser_navigation(
         self,
@@ -545,7 +769,7 @@ class TeamsDomExtractor:
                     continue
 
                 parsed = urlparse(url)
-                if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith(".sharepoint.com"):
+                if not trusted_sharepoint_url(url):
                     result = {
                         "localPath": None, "status": "failed", "errorCode": "unsupported-file-host",
                         "attempts": 2, "captureMode": "rendered-url",
@@ -554,13 +778,14 @@ class TeamsDomExtractor:
                     item.update({key: value for key, value in result.items() if key != "attempts"})
                     continue
 
-                navigation_result = await self._download_via_browser_navigation(
-                    page, url, target_dir, item.get("name") or "attachment",
-                )
-                if navigation_result:
-                    results[url] = navigation_result
-                    item.update(navigation_result)
-                    continue
+                if not self.avoid_browser_downloads:
+                    navigation_result = await self._download_via_browser_navigation(
+                        page, url, target_dir, item.get("name") or "attachment",
+                    )
+                    if navigation_result:
+                        results[url] = navigation_result
+                        item.update(navigation_result)
+                        continue
 
                 try:
                     query = dict(parse_qsl(parsed.query, keep_blank_values=True))

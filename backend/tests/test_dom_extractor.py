@@ -1,8 +1,19 @@
+import asyncio
+
 import pytest
 from playwright.async_api import async_playwright
 
 from teams_archive.capture.browser import chrome_executable
-from teams_archive.capture.extractor import TeamsDomExtractor
+from teams_archive.capture.extractor import TeamsDomExtractor, trusted_teams_url
+
+
+def test_only_saved_https_teams_urls_are_navigable() -> None:
+    assert trusted_teams_url("https://teams.cloud.microsoft/v2/?channel=stored")
+    assert trusted_teams_url("https://teams.microsoft.com/l/channel/stored")
+    assert not trusted_teams_url("https://example.com/not-teams")
+    assert not trusted_teams_url("https://user:password@teams.cloud.microsoft/v2/")
+    assert not trusted_teams_url("https://teams.cloud.microsoft:1234/v2/")
+    assert not trusted_teams_url("https://teams.cloud.microsoft:bad/v2/")
 
 
 @pytest.mark.asyncio
@@ -82,3 +93,87 @@ async def test_channel_viewport_falls_back_to_scrollable_message_parent(tmp_path
         await browser.close()
 
     assert viewport_id == "current-channel-scroll"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_channel_navigation_uses_saved_url_after_chrome_reopens(tmp_path) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chrome", headless=True)
+        page = await browser.new_page()
+        await page.set_content("""
+          <title>Teams and Channels | Client | Legal | Microsoft Teams</title>
+          <div data-tid="channelTitle-text">Legal</div>
+          <div data-tid="response-surface" id="response-surface-wrong-source"></div>
+        """)
+        saved_url = "https://teams.cloud.microsoft/v2/?channel=stored"
+        await page.route(saved_url, lambda route: route.fulfill(body="""
+          <title>Teams and Channels | Client | Legal | Microsoft Teams</title>
+          <div data-tid="experience-layout">
+            <div data-tid="channelTitle-text">Legal</div>
+            <div data-tid="response-surface" id="response-surface-right-source"></div>
+          </div>
+        """, content_type="text/html"))
+        extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+
+        await extractor.navigate_to_channel(
+            page, "Client", "Legal", saved_url, "right-source",
+        )
+
+        assert page.url == saved_url
+        await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_channel_navigation_waits_for_teams_after_reopen_without_saved_url(tmp_path) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chrome", headless=True)
+        page = await browser.new_page()
+        await page.set_content("<main>Loading Teams</main>")
+
+        async def render_teams() -> None:
+            await asyncio.sleep(0.2)
+            await page.set_content("""
+              <title>Teams and Channels | Client | Legal | Microsoft Teams</title>
+              <div data-tid="experience-layout">
+                <div role="treeitem" aria-label="Client Legal" onclick="
+                  document.getElementById('channel').textContent='Legal'
+                ">Legal</div>
+                <div data-tid="channelTitle-text" id="channel">Home</div>
+              </div>
+            """)
+
+        rendering = asyncio.create_task(render_teams())
+        extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+        await extractor.navigate_to_channel(page, "Client", "Legal")
+        await rendering
+
+        assert await page.locator('[data-tid="channelTitle-text"]').text_content() == "Legal"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_channel_navigation_ignores_untrusted_saved_url(tmp_path) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chrome", headless=True)
+        page = await browser.new_page()
+        await page.set_content("""
+          <title>Teams and Channels | Client | Home | Microsoft Teams</title>
+          <div data-tid="experience-layout">
+            <div role="treeitem" aria-label="Client Legal" onclick="
+              document.getElementById('channel').textContent='Legal';
+              document.title='Teams and Channels | Client | Legal | Microsoft Teams'
+            ">Legal</div>
+            <div data-tid="channelTitle-text" id="channel">Home</div>
+          </div>
+        """)
+        extractor = TeamsDomExtractor(tmp_path / "files", tmp_path / "assets")
+
+        await extractor.navigate_to_channel(
+            page, "Client", "Legal", "https://example.com/not-teams",
+        )
+
+        assert page.url == "about:blank"
+        await browser.close()

@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytest
+from playwright.async_api import async_playwright
 
+from teams_archive.capture.browser import chrome_executable
 from teams_archive.capture.extractor import (
     FORBIDDEN_ACTION_NAMES,
     TeamsDomExtractor,
@@ -10,6 +12,7 @@ from teams_archive.capture.extractor import (
     stable_hash,
     storage_key,
     team_from_title,
+    trusted_sharepoint_url,
 )
 from teams_archive.capture.service import sanitize_post
 
@@ -21,6 +24,9 @@ def test_capture_helpers_are_stable_and_cross_platform_safe() -> None:
     assert all(character in "0123456789abcdef" for character in storage_key("ui-channel:abc"))
     assert safe_filename('a<b>:c?.pdf') == "a_b__c_.pdf"
     assert team_from_title("Teams and Channels | Client | Legal | Microsoft Teams", "Legal") == "Client"
+    assert trusted_sharepoint_url("https://tenant.sharepoint.com/sites/client/file.pdf")
+    assert not trusted_sharepoint_url("https://tenant.sharepoint.com.evil.test/file.pdf")
+    assert not trusted_sharepoint_url("https://user:password@tenant.sharepoint.com/file.pdf")
 
 
 def test_message_html_is_sanitized_before_storage() -> None:
@@ -264,3 +270,69 @@ async def test_browser_navigation_fallback_captures_download_event(tmp_path: Pat
     assert result["status"] == "local"
     assert result["captureMode"] == "browser-navigation"
     assert Path(result["localPath"]).read_bytes() == b"browser-download"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chrome_executable(), reason="Google Chrome Stable is required")
+async def test_browser_stream_captures_preview_file_without_download_item(tmp_path: Path) -> None:
+    payload = b"streamed-file-content" * 8192
+    url = "https://tenant.sharepoint.com/preview"
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chrome", headless=True)
+        context = await browser.new_context(accept_downloads=True)
+        download_events = []
+        context.on("page", lambda opened: opened.on(
+            "download", lambda event: download_events.append(event)
+        ))
+
+        async def route_file(route):
+            if route.request.url == url:
+                await route.fulfill(
+                    body="<html><iframe src='/file'></iframe></html>",
+                    content_type="text/html",
+                )
+            else:
+                await route.fulfill(
+                    body=payload,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Disposition": 'attachment; filename="report.bin"',
+                    },
+                )
+
+        await context.route("https://tenant.sharepoint.com/**", route_file)
+        page = await context.new_page()
+        extractor = TeamsDomExtractor(
+            tmp_path / "files", tmp_path / "assets", avoid_browser_downloads=True,
+        )
+        messages = [{"id": "1000", "attachments": [{"name": "fallback.bin", "url": url}]}]
+
+        await extractor._download_attachments(page, "ui-channel:one", messages)
+
+        attachment = messages[0]["attachments"][0]
+        assert attachment["status"] == "local"
+        assert attachment["captureMode"] == "browser-stream"
+        assert Path(attachment["localPath"]).read_bytes() == payload
+        assert download_events == []
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_safe_download_fallback_never_uses_browser_download_item(tmp_path: Path) -> None:
+    url = "https://tenant.sharepoint.com/sites/client/file.pdf"
+    messages = [{"id": "1000", "attachments": [{"name": "file.pdf", "url": url}]}]
+    extractor = TeamsDomExtractor(
+        tmp_path / "files", tmp_path / "assets", avoid_browser_downloads=True,
+    )
+
+    async def unexpected_browser_download(*_args):
+        raise AssertionError("browser download item must not be created")
+
+    extractor._download_via_browser_navigation = unexpected_browser_download
+    await extractor._download_attachment_fallbacks(
+        DirectDownloadPage(FakeResponse(b"pdf-content")), "ui-channel:one", messages, {},
+    )
+
+    attachment = messages[0]["attachments"][0]
+    assert attachment["status"] == "local"
+    assert Path(attachment["localPath"]).read_bytes() == b"pdf-content"

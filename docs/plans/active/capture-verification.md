@@ -48,3 +48,13 @@ Preserve existing archive/profile. Stop only identified app processes during an 
   zero violations. Backend regression suite now has 26 passing tests.
 - Windows troubleshooting and the complete fix history are recorded in
   `docs/windows-troubleshooting.md`.
+- Windows 0.3.0 crashed Chrome after the first thread. Both dumps have the same
+  symbolized Chrome download-bubble stack ending in an excessive allocation;
+  the exact app action that triggered it remains unknown. The app then lost the
+  channel on reopen and failed both channels with `channel-not-visible`.
+- The 0.3.1 recovery change uses the saved Teams URL when present and waits for
+  Teams to load before UI navigation. Windows file capture now streams
+  SharePoint responses through Chrome DevTools Fetch without creating a Chrome
+  download item; invalid or unavailable files remain reported as incomplete.
+  Synthetic headed Chrome streaming proof and Linux regression tests pass.
+  Windows production verification remains open.

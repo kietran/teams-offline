@@ -22,9 +22,10 @@ class RecoveringBrowser:
 class ClosingOnceExtractor:
     def __init__(self) -> None:
         self.attempts = 0
+        self.navigation_calls = []
 
-    async def navigate_to_channel(self, _page, _team_name, _channel_name):
-        return None
+    async def navigate_to_channel(self, _page, _team_name, _channel_name, web_url, source_locator):
+        self.navigation_calls.append((web_url, source_locator))
 
     async def discover_current_channel(self, _page):
         return ChannelIdentity("ui-channel:one", "ui-team:one", "Client", "Legal", "source", "source_id")
@@ -65,7 +66,8 @@ async def test_capture_reopens_chrome_and_retries_channel_once(tmp_path) -> None
     database.initialize()
     database.upsert_channel({
         "id": "ui-channel:one", "teamId": "ui-team:one", "teamName": "Client",
-        "displayName": "Legal", "membershipType": "standard", "webUrl": None,
+        "displayName": "Legal", "membershipType": "standard",
+        "webUrl": "https://teams.cloud.microsoft/v2/?channel=stored",
         "sourceLocator": "source", "identityConfidence": "source_id",
     })
     browser = RecoveringBrowser()
@@ -77,6 +79,9 @@ async def test_capture_reopens_chrome_and_retries_channel_once(tmp_path) -> None
 
     assert browser.reopen_calls == 1
     assert extractor.attempts == 2
+    assert extractor.navigation_calls == [
+        ("https://teams.cloud.microsoft/v2/?channel=stored", "source"),
+    ] * 2
     assert database.current_capture()["status"] == "completed"
 
 

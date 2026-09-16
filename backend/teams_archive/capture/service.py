@@ -87,7 +87,10 @@ class CaptureCoordinator:
 
     async def _capture_channel_once(self, run_id: str, channel_id: str, channel: dict[str, Any]) -> dict[str, int]:
         page = await self.browser.page()
-        await self.extractor.navigate_to_channel(page, channel["team_name"], channel["display_name"])
+        await self.extractor.navigate_to_channel(
+            page, channel["team_name"], channel["display_name"],
+            channel.get("web_url"), channel.get("source_locator"),
+        )
         completed = self.database.completed_post_ids(run_id)
         progress = self.database.capture_channel_progress(run_id, channel_id)
         counters = {

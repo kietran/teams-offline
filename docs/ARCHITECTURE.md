@@ -19,7 +19,7 @@ Teams rendered DOM
   → harvest root/reply batches
   → sanitize HTML + normalize IDs
   → atomic per-post SQLite upsert
-  → authenticated UI download / Chrome navigation fallback / image capture
+  → authenticated file capture / image capture
   → local files + capture evidence
   → React archive/search
 ```
@@ -31,10 +31,16 @@ Teams rendered DOM
 - Composer, send, share, edit and delete actions are forbidden.
 - The app never reads browser cookies/tokens into application data or calls
   undocumented Teams endpoints.
-- File capture prefers the rendered Teams `Download` action. If a virtualized
-  card cannot be driven, Chrome may navigate the rendered HTTPS SharePoint URL
-  and capture the resulting browser download; a final request-context fallback
-  rejects HTML/login pages and empty bodies.
+- On Windows, file capture streams the response to a rendered HTTPS SharePoint
+  URL through Chrome DevTools Fetch before Chrome creates a download item. The
+  response is written to a temporary local file and atomically moved into the
+  archive. If streaming fails, request-context fallback may try the same
+  rendered URL; a failed file remains explicitly reported. This avoids a Chrome
+  152 download-bubble crash path observed in two Windows minidumps.
+- On Linux, file capture still prefers the rendered Teams `Download` action and
+  may use Chrome navigation for a rendered SharePoint URL if its UI card cannot
+  be driven. URL response paths reject HTML/login pages, empty bodies, and
+  unsupported hosts rather than storing them as files.
 - One capture run owns the Chrome page at a time; channels are sequential.
 - Every post commits independently. Startup marks an in-flight run interrupted;
   resume skips completed post IDs.

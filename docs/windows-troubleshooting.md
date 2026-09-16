@@ -17,6 +17,9 @@ builds, not verified releases.
 - Linux production capture is verified on three selected Teams channels. The
   exact final Windows package still requires a smoke run before describing the
   Windows artifact as end-to-end verified.
+- A Windows 0.3.0 capture crashed Chrome after its first thread. The cause of
+  that Chrome allocation failure is still unknown. A separate navigation
+  recovery defect then caused `channel-not-visible` on both selected channels.
 - GitHub Actions builds are unsigned. Removing the known blocked native module
   reduces Smart App Control failures, but it does not provide the guarantee of
   a trusted code-signing certificate.
@@ -332,17 +335,66 @@ Linux production evidence across three channels: 10/10 roots, 587/587 replies,
 151/151 attachment references, 18/18 hosted images, zero failed/pending files,
 and every local path non-empty.
 
+### 14. Chrome crash followed by `channel-not-visible` in 0.3.0
+
+The Windows 0.3.0 run recorded its first thread (one root and 34/34 replies),
+then the main Chrome process crashed. Two crash dumps reported `0xE0000008`
+and an attempted allocation of `0xFFFFFFFFFFFFFFF4` while approximately
+5.7–6.2 GiB remained available. This is not evidence that the machine ran out
+of RAM.
+
+The two raw dumps were stackwalked locally and their Chrome addresses mapped
+with the public PDB for Chrome 152.0.7977.84. The frames were recovered by
+stack scanning, so the exact unwind cannot be guaranteed, but both show the
+same coherent chain on `CrBrowserMain`:
+`DownloadBubbleUpdateService::CacheManager::UpdateDisplayInfoForDownloadItem`
+→ `DownloadItemImpl::AddObserver` →
+`vector<CheckedObserverAdapter>::emplace_back` →
+`PartitionExcessiveAllocationSize`. Chrome's crash breadcrumbs end with a
+`Tab2` navigation marked `#download ERR_ABORTED` in both dumps. The immediate
+failure is therefore in Chrome's download-item UI path. The breadcrumbs do not
+prove which app action or SharePoint response initiated that download, and the
+precise memory corruption or arithmetic error inside Chrome is still unknown.
+The earlier Linux capture used Chrome 149, while this Windows run used Chrome
+152; these observations do not isolate the operating system as the cause.
+
+After reopening Chrome, the app started at Teams home and immediately searched
+for each channel before Teams had finished loading. It also ignored the saved
+channel URL. Both channels then failed with `channel-not-visible`. This is a
+separate app recovery failure, not an explanation for the Chrome crash. The six
+files shown for the first channel had already been saved in an earlier run; the
+0.3.0 run did not finish that channel.
+
+Recovery change in 0.3.1:
+
+- Navigate to a saved HTTPS Teams channel URL when available, and verify the
+  channel name, Team, and observable source ID before capture.
+- If no usable URL exists, wait for the Teams layout before using the channel
+  tree or search UI. Reject stored URLs outside the known Teams hosts.
+- Preserve per-post checkpoints so a retry can skip the already saved thread.
+- On Windows, stream file responses from rendered HTTPS SharePoint URLs through
+  the managed Chrome session using DevTools Fetch. This captures the bytes
+  before Chrome creates a download item, avoiding the observed download-bubble
+  stack. A failed stream falls back only to a request-context fetch; it is
+  reported as incomplete if no valid bytes are available. It does not invoke
+  Chrome's download-item UI again during that file attempt.
+
+The Chrome internal defect remains outside the app. A headed Chrome test with a
+synthetic HTML preview and file response captured all bytes without a download
+event. The 0.3.1 mitigation needs a real Windows capture before claiming it
+prevents the crash there or preserves full file coverage.
+
 ## Validation performed
 
-The latest source test run before this document reported:
+The 0.3.1 Linux source test run reported:
 
 ```text
-26 passed
+32 passed
 ```
 
 Earlier checks on the same change series also passed:
 
-- 2 frontend Vitest tests.
+- 3 frontend Vitest tests.
 - ESLint.
 - TypeScript and Vite production build.
 - PyInstaller Windows onedir build.
@@ -351,11 +403,9 @@ Earlier checks on the same change series also passed:
 - A Mark-of-the-Web simulation for an intermediate build, with no corresponding
   Code Integrity block event.
 
-The final local source built successfully with PyInstaller, but Smart App
-Control blocked that new unsigned executable hash before `--self-test` could
-run. Therefore packaged-runtime proof for the exact final hash is pending CI or
-a signed build; the earlier packaged self-tests apply only to intermediate
-hashes.
+The 0.3.1 Linux PyInstaller package passed `--self-test`. A previous unsigned
+Windows diagnostic hash was blocked by Smart App Control; the Windows 0.3.1
+package still needs GitHub Actions build and real Teams capture validation.
 
 These checks cover regressions and packaging. They do not replace the remaining
 production acceptance test.
